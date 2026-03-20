@@ -1,0 +1,15 @@
+services:
+  audio-pipeline-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: audio-pipeline-service
+    ports:
+      - "50051:50051"
+    environment:
+      - GRPC_PORT=50051
+      - GRPC_FEEDBACK_URL=host.docker.internal:50052
+    volumes:
+      # Opcional: montar volume para salvar arquivos de áudio
+      - ./storage:/app/storage
+    restart: unless-stopped

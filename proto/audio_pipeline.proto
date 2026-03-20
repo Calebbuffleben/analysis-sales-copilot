@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package audio_pipeline;
+
+service AudioPipelineService {
+  // Client streaming: cliente envia múltiplos chunks de áudio em sequência
+  rpc StreamAudio(stream AudioChunk) returns (StreamAudioResponse);
+}
+
+message AudioChunk {
+  string meeting_id = 1;
+  string participant_id = 2;
+  string track = 3;
+  bytes wav_data = 4;
+  int32 sample_rate = 5;
+  int32 channels = 6;
+  int64 timestamp_ms = 7;
+  int32 sequence = 8;
+}
+
+message StreamAudioResponse {
+  bool success = 1;
+  string message = 2;
+  int32 chunks_received = 3;
+}
