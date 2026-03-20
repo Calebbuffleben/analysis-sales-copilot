@@ -54,6 +54,12 @@ class AudioPipelineServicer(audio_pipeline_pb2_grpc.AudioPipelineServiceServicer
                     meeting_id = chunk.meeting_id
                     participant_id = chunk.participant_id
                     track = chunk.track
+                    logger.info(
+                        "🎙️ StreamAudio started | meetingId=%s | participantId=%s | track=%s",
+                        meeting_id,
+                        participant_id,
+                        track,
+                    )
 
                     self.audio_service.start_stream(
                         meeting_id=meeting_id,
@@ -87,6 +93,12 @@ class AudioPipelineServicer(audio_pipeline_pb2_grpc.AudioPipelineServiceServicer
                     meeting_id=meeting_id,
                     participant_id=participant_id,
                     track=track
+                )
+                logger.info(
+                    "✅ StreamAudio finished | meetingId=%s | participantId=%s | chunks=%s",
+                    meeting_id,
+                    participant_id,
+                    chunks_received,
                 )
 
             # TODO: Consider returning or logging high-level stream metrics
