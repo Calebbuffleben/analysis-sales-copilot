@@ -27,10 +27,14 @@ class Settings:
     @classmethod
     def from_env(cls) -> 'Settings':
         """Create settings from environment variables."""
+        # Railway injects `RAILWAY_SERVICE_NAME` in production containers; use it to
+        # switch defaults from local dev to production endpoints.
+        default_grpc_feedback_url = 'https://backend-analysis-production-a688.up.railway.app:50052'
+
         return cls(
             grpc_port=int(os.getenv('GRPC_PORT', '50051')),
             grpc_workers=int(os.getenv('GRPC_WORKERS', '10')),
-            grpc_feedback_url=os.getenv('GRPC_FEEDBACK_URL', 'localhost:50052'),
+            grpc_feedback_url=os.getenv('GRPC_FEEDBACK_URL', default_grpc_feedback_url),
             grpc_feedback_enabled=os.getenv('GRPC_FEEDBACK_ENABLED', 'true').lower() == 'true',
             grpc_feedback_timeout_seconds=float(
                 os.getenv('GRPC_FEEDBACK_TIMEOUT_SECONDS', '5.0'),
