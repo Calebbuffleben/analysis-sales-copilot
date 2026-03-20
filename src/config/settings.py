@@ -27,14 +27,20 @@ class Settings:
     @classmethod
     def from_env(cls) -> 'Settings':
         """Create settings from environment variables."""
-        # Railway injects `RAILWAY_SERVICE_NAME` in production containers; use it to
-        # switch defaults from local dev to production endpoints.
-        default_grpc_feedback_url = 'https://backend-analysis-production-a688.up.railway.app:50052'
+        # Backend gRPC ingress is plain (insecure) on 50052. On Railway, reach it via
+        # private DNS: <backend-service>.railway.internal:50052 — not https://*.up.railway.app
+        default_grpc_feedback_url = (
+            'backend-analysis-production.railway.internal:50052'
+            if os.getenv('RAILWAY_SERVICE_NAME')
+            else 'localhost:50052'
+        )
+        feedback_raw = os.getenv('GRPC_FEEDBACK_URL', default_grpc_feedback_url)
+        grpc_feedback_url = cls._normalize_grpc_target(feedback_raw)
 
         return cls(
             grpc_port=int(os.getenv('GRPC_PORT', '50051')),
             grpc_workers=int(os.getenv('GRPC_WORKERS', '10')),
-            grpc_feedback_url=os.getenv('GRPC_FEEDBACK_URL', default_grpc_feedback_url),
+            grpc_feedback_url=grpc_feedback_url,
             grpc_feedback_enabled=os.getenv('GRPC_FEEDBACK_ENABLED', 'true').lower() == 'true',
             grpc_feedback_timeout_seconds=float(
                 os.getenv('GRPC_FEEDBACK_TIMEOUT_SECONDS', '5.0'),
@@ -58,6 +64,18 @@ class Settings:
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             proto_dir=os.getenv('PROTO_DIR'),
         )
+
+    @staticmethod
+    def _normalize_grpc_target(raw: str) -> str:
+        """Strip http(s):// for grpc.insecure_channel (host:port only)."""
+        if not raw:
+            return raw
+        u = raw.strip()
+        if u.startswith('https://'):
+            return u[8:].split('/', 1)[0]
+        if u.startswith('http://'):
+            return u[7:].split('/', 1)[0]
+        return u
 
     def validate(self) -> None:
         """Validate settings values."""
