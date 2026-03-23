@@ -24,7 +24,10 @@ if __name__ == '__main__':
 from src.config import get_settings, setup_logging
 from src.grpc_server.server import create_server, start_server
 
-logger = logging.getLogger(__name__)
+# When run as `python src/main.py`, __name__ is "__main__" — use a stable name in logs.
+logger = logging.getLogger(
+    "audio_pipeline" if __name__ == "__main__" else __name__,
+)
 
 
 def main():
