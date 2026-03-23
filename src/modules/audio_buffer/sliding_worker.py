@@ -28,7 +28,12 @@ Planned responsibilities:
 
 from __future__ import annotations
 
+import logging
 from typing import Callable, Dict, Optional, Tuple
+
+from .audio_diagnostics import compute_pcm_window_stats
+
+logger = logging.getLogger(__name__)
 
 WindowDataReader = Callable[[str], Optional[Tuple[bytes, Dict[str, object]]]]
 WindowReadyCallback = Callable[[str, bytes, Dict[str, object]], None]
@@ -109,6 +114,31 @@ class SlidingWindowWorker:
 
         enriched_meta = dict(meta)
         enriched_meta['window_duration_ms'] = int(window_duration_seconds * 1000)
+
+        sr = int(meta.get('sample_rate', 0) or 0)
+        ch = max(int(meta.get('channels', 1)), 1)
+        wstats = compute_pcm_window_stats(
+            window_pcm,
+            sample_rate=sr,
+            channels=ch,
+        )
+        logger.info(
+            '🔊 Window ready | stream_key=%s | pcm_bytes=%s | duration_ms=%s | '
+            'sample_rate=%s | channels=%s | window_start_ms=%s | window_end_ms=%s | '
+            'seq=%s | mean_rms_dbfs=%s | speech_ratio=%.4f | peak_abs=%s',
+            stream_key,
+            len(window_pcm),
+            enriched_meta['window_duration_ms'],
+            sr,
+            ch,
+            int(meta.get('window_start_ms', 0)),
+            int(meta.get('window_end_ms', 0)),
+            int(meta.get('sequence', 0)),
+            wstats.get('mean_rms_dbfs'),
+            (float(wstats.get('speech_count') or 0) / max(int(wstats.get('samples_count') or 0), 1)),
+            wstats.get('peak_abs'),
+        )
+
         self._window_callback(stream_key, window_pcm, enriched_meta)
         self._last_emitted_at_ms[stream_key] = window_end_ms
         return True

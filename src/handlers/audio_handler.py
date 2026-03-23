@@ -54,11 +54,16 @@ class AudioPipelineServicer(audio_pipeline_pb2_grpc.AudioPipelineServiceServicer
                     meeting_id = chunk.meeting_id
                     participant_id = chunk.participant_id
                     track = chunk.track
+                    bytes_per_sec = int(chunk.sample_rate) * int(chunk.channels) * 2
                     logger.info(
-                        "🎙️ StreamAudio started | meetingId=%s | participantId=%s | track=%s",
+                        "🎙️ StreamAudio started | meetingId=%s | participantId=%s | track=%s | "
+                        "sample_rate=%s | channels=%s | contract_s16le_bytes_per_sec=%s",
                         meeting_id,
                         participant_id,
                         track,
+                        chunk.sample_rate,
+                        chunk.channels,
+                        bytes_per_sec,
                     )
 
                     self.audio_service.start_stream(

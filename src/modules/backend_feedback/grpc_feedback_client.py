@@ -94,15 +94,43 @@ class BackendFeedbackClient:
                 indecision_metrics.get('postponement_likelihood', 0.0),
             )
 
-        self._stub.PublishFeedback(
-            request,
-            timeout=self._timeout_seconds,
-        )
+        try:
+            self._stub.PublishFeedback(
+                request,
+                timeout=self._timeout_seconds,
+            )
+        except grpc.RpcError as exc:
+            logger.error(
+                '📨 Feedback publish failed (gRPC) | meetingId=%s | participantId=%s | '
+                'type=%s | code=%s | details=%s',
+                event.meeting_id,
+                event.participant_id,
+                event.feedback_type,
+                exc.code(),
+                exc.details(),
+            )
+            raise
+        except Exception as exc:
+            logger.error(
+                '📨 Feedback publish failed | meetingId=%s | participantId=%s | type=%s | %s',
+                event.meeting_id,
+                event.participant_id,
+                event.feedback_type,
+                exc,
+                exc_info=True,
+            )
+            raise
+
+        transcript_chars = len(event.transcript_text or '')
         logger.info(
-            '📨 Feedback published | meetingId=%s | participantId=%s | type=%s',
+            '📨 Feedback published | meetingId=%s | participantId=%s | type=%s | '
+            'transcript_chars=%s | window=[%s..%s]',
             event.meeting_id,
             event.participant_id,
             event.feedback_type,
+            transcript_chars,
+            event.window_start_ms,
+            event.window_end_ms,
         )
 
     def _initialize_stub(self) -> None:

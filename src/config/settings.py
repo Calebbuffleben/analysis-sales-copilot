@@ -21,6 +21,9 @@ class Settings:
     transcription_model_size: str = 'small'
     transcription_device: str = 'cpu'
     transcription_compute_type: str = 'int8'
+    whisper_vad_filter: bool = True
+    whisper_empty_diagnostic_no_vad: bool = False
+    whisper_low_energy_dbfs: float = -50.0
     log_level: str = 'INFO'
     proto_dir: Optional[str] = None
 
@@ -60,6 +63,16 @@ class Settings:
             transcription_compute_type=os.getenv(
                 'TRANSCRIPTION_COMPUTE_TYPE',
                 'int8',
+            ),
+            whisper_vad_filter=os.getenv('WHISPER_VAD_FILTER', 'true').lower()
+            == 'true',
+            whisper_empty_diagnostic_no_vad=os.getenv(
+                'WHISPER_EMPTY_DIAGNOSTIC_NO_VAD',
+                'false',
+            ).lower()
+            == 'true',
+            whisper_low_energy_dbfs=float(
+                os.getenv('WHISPER_LOW_ENERGY_DBFS', '-50.0'),
             ),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             proto_dir=os.getenv('PROTO_DIR'),
@@ -102,6 +115,10 @@ class Settings:
             )
         if not self.log_level.upper() in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']:
             raise ValueError(f'Invalid LOG_LEVEL: {self.log_level}')
+        if not -120.0 <= self.whisper_low_energy_dbfs <= 0.0:
+            raise ValueError(
+                f'Invalid WHISPER_LOW_ENERGY_DBFS: {self.whisper_low_energy_dbfs}',
+            )
 
 
 # Global settings instance

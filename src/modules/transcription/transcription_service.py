@@ -20,6 +20,7 @@ import logging
 import math
 from typing import Any, Optional
 
+from ..audio_buffer.audio_diagnostics import compute_pcm_window_stats
 from .types import TranscriptionResult
 
 logger = logging.getLogger(__name__)
@@ -33,10 +34,16 @@ class TranscriptionService:
         model_size: str = 'small',
         device: str = 'cpu',
         compute_type: str = 'int8',
+        vad_filter: bool = True,
+        empty_diagnostic_no_vad: bool = False,
+        low_energy_dbfs_threshold: float = -50.0,
     ) -> None:
         self._model_size = model_size
         self._device = device
         self._compute_type = compute_type
+        self._vad_filter = vad_filter
+        self._empty_diagnostic_no_vad = empty_diagnostic_no_vad
+        self._low_energy_dbfs_threshold = low_energy_dbfs_threshold
         self._model: Optional[Any] = None
 
     def transcribe(self, window_pcm: bytes, meta: dict) -> TranscriptionResult:
@@ -49,19 +56,40 @@ class TranscriptionService:
         Returns:
             A `TranscriptionResult` with text and confidence.
         """
+        sample_rate = int(meta.get('sample_rate', 0) or 0)
+        channels = max(int(meta.get('channels', 1)), 1)
+
         if not window_pcm:
-            return TranscriptionResult(text='', confidence=0.0)
+            logger.info(
+                '📝 STT skip | reason=no_pcm | meetingId=%s | participantId=%s',
+                meta.get('meeting_id'),
+                meta.get('participant_id'),
+            )
+            return TranscriptionResult(
+                text='',
+                confidence=0.0,
+                segment_count=0,
+                vad_filter_used=self._vad_filter,
+                empty_reason='no_pcm',
+            )
+
+        stats = compute_pcm_window_stats(
+            window_pcm,
+            sample_rate=sample_rate,
+            channels=channels,
+        )
 
         np = self._import_numpy()
         audio = np.frombuffer(window_pcm, dtype=np.int16).astype(np.float32) / 32768.0
 
         model = self._get_model()
         language = meta.get('language')
+
         segments, info = model.transcribe(
             audio=audio,
             language=language or None,
             beam_size=1,
-            vad_filter=True,
+            vad_filter=self._vad_filter,
         )
 
         segment_list = list(segments)
@@ -74,19 +102,114 @@ class TranscriptionService:
         confidence = self._calculate_confidence(segment_list)
         detected_language = getattr(info, 'language', None)
 
-        logger.info(
-            '📝 Transcription completed | meetingId=%s | participantId=%s | chars=%s | confidence=%.3f',
-            meta.get('meeting_id'),
-            meta.get('participant_id'),
-            len(transcript_text),
-            confidence,
-        )
+        diagnostic_no_vad_chars = 0
+        empty_reason: Optional[str] = None
+
+        if not transcript_text:
+            empty_reason = self._classify_empty_transcript(
+                stats=stats,
+                segment_count=len(segment_list),
+            )
+            if (
+                self._empty_diagnostic_no_vad
+                and self._vad_filter
+                and len(segment_list) == 0
+            ):
+                segments_nv, _info_nv = model.transcribe(
+                    audio=audio,
+                    language=language or None,
+                    beam_size=1,
+                    vad_filter=False,
+                )
+                nv_list = list(segments_nv)
+                nv_text = ' '.join(
+                    segment.text.strip()
+                    for segment in nv_list
+                    if getattr(segment, 'text', '').strip()
+                ).strip()
+                diagnostic_no_vad_chars = len(nv_text)
+                if diagnostic_no_vad_chars > 0:
+                    logger.info(
+                        '📝 STT diagnostic | no-VAD rerun produced text | '
+                        'chars=%s | meetingId=%s | suggests=VAD_or_filtering',
+                        diagnostic_no_vad_chars,
+                        meta.get('meeting_id'),
+                    )
+                    if empty_reason == 'empty_segments_vad_on':
+                        empty_reason = 'vad_likely_suppressed_speech'
+                else:
+                    logger.info(
+                        '📝 STT diagnostic | no-VAD rerun also empty | meetingId=%s',
+                        meta.get('meeting_id'),
+                    )
+
+            logger.info(
+                '📝 STT empty | reason=%s | meetingId=%s | participantId=%s | '
+                'vad_filter=%s | segments=%s | duration_s=%.3f | pcm_bytes=%s | '
+                'mean_rms_dbfs=%s | speech_ratio=%.4f | peak_abs=%s | diag_no_vad_chars=%s',
+                empty_reason,
+                meta.get('meeting_id'),
+                meta.get('participant_id'),
+                self._vad_filter,
+                len(segment_list),
+                float(stats.get('duration_seconds') or 0.0),
+                stats.get('bytes_len'),
+                stats.get('mean_rms_dbfs'),
+                self._speech_ratio(stats),
+                stats.get('peak_abs'),
+                diagnostic_no_vad_chars,
+            )
+        else:
+            logger.info(
+                '📝 Transcription completed | meetingId=%s | participantId=%s | '
+                'chars=%s | confidence=%.3f | vad_filter=%s | segments=%s | '
+                'duration_s=%.3f | mean_rms_dbfs=%s',
+                meta.get('meeting_id'),
+                meta.get('participant_id'),
+                len(transcript_text),
+                confidence,
+                self._vad_filter,
+                len(segment_list),
+                float(stats.get('duration_seconds') or 0.0),
+                stats.get('mean_rms_dbfs'),
+            )
 
         return TranscriptionResult(
             text=transcript_text,
             confidence=confidence,
             language=detected_language,
+            segment_count=len(segment_list),
+            vad_filter_used=self._vad_filter,
+            empty_reason=empty_reason,
+            diagnostic_no_vad_chars=diagnostic_no_vad_chars,
         )
+
+    def _speech_ratio(self, stats: dict) -> float:
+        samples = int(stats.get('samples_count') or 0)
+        if samples <= 0:
+            return 0.0
+        return float(stats.get('speech_count') or 0) / float(samples)
+
+    def _classify_empty_transcript(
+        self,
+        *,
+        stats: dict,
+        segment_count: int,
+    ) -> str:
+        """Best-effort label for why STT returned no text (for logs/metrics)."""
+        duration = float(stats.get('duration_seconds') or 0.0)
+        if duration < 0.2:
+            return 'window_too_short'
+        mean_rms = stats.get('mean_rms_dbfs')
+        if mean_rms is not None and mean_rms < self._low_energy_dbfs_threshold:
+            return 'low_energy'
+        if self._speech_ratio(stats) < 0.01:
+            return 'mostly_silent'
+        if self._vad_filter and segment_count == 0:
+            return 'empty_segments_vad_on'
+        if not self._vad_filter and segment_count == 0:
+            return 'empty_segments_vad_off'
+        return 'no_text_other'
 
     def _get_model(self) -> Any:
         """Lazily create and cache the faster-whisper model instance."""

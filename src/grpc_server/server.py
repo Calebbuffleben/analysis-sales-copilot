@@ -112,6 +112,9 @@ def create_server(config: Settings) -> grpc.Server:
         model_size=config.transcription_model_size,
         device=config.transcription_device,
         compute_type=config.transcription_compute_type,
+        vad_filter=config.whisper_vad_filter,
+        empty_diagnostic_no_vad=config.whisper_empty_diagnostic_no_vad,
+        low_energy_dbfs_threshold=config.whisper_low_energy_dbfs,
     )
     text_analysis_service = TextAnalysisService()
     backend_feedback_client = BackendFeedbackClient(
@@ -137,6 +140,13 @@ def create_server(config: Settings) -> grpc.Server:
     )
 
     logger.info(f"Servidor gRPC criado com {config.grpc_workers} workers")
+    logger.info(
+        'STT config | WHISPER_VAD_FILTER=%s | WHISPER_EMPTY_DIAGNOSTIC_NO_VAD=%s | '
+        'WHISPER_LOW_ENERGY_DBFS=%s',
+        config.whisper_vad_filter,
+        config.whisper_empty_diagnostic_no_vad,
+        config.whisper_low_energy_dbfs,
+    )
 
     return server
 

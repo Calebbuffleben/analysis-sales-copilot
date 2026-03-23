@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
-import math
 
+from ..audio_buffer.audio_diagnostics import compute_pcm_window_stats
 from ..backend_feedback.grpc_feedback_client import BackendFeedbackClient
 from ..backend_feedback.types import BackendFeedbackEvent
 from ..text_analysis.text_analysis_service import TextAnalysisService
@@ -36,6 +36,14 @@ class TranscriptionPipelineService:
         """Callback invoked by SlidingWindowWorker when a window is ready."""
         transcription = self._transcription_service.transcribe(window_pcm, meta)
         if not transcription.text.strip():
+            logger.info(
+                '⏭️ Pipeline skip (empty transcript) | stream_key=%s | reason=%s | '
+                'vad_filter=%s | segments=%s',
+                stream_key,
+                transcription.empty_reason,
+                transcription.vad_filter_used,
+                transcription.segment_count,
+            )
             return
 
         chunk = TranscriptionChunk(
@@ -60,7 +68,14 @@ class TranscriptionPipelineService:
     ) -> None:
         """Publish a raw text-analysis ingress event to the backend."""
         event = self._build_event(transcript, analysis)
-        self._backend_feedback_client.publish_feedback(event)
+        try:
+            self._backend_feedback_client.publish_feedback(event)
+        except Exception as exc:
+            logger.exception(
+                'Feedback publish failed after transcript | stream_key=%s | error=%s',
+                stream_key,
+                exc,
+            )
 
     def _build_event(
         self,
@@ -92,38 +107,13 @@ class TranscriptionPipelineService:
     ) -> None:
         """Attach audio-window stats used by backend feedback rules."""
         channels = max(int(meta.get('channels', 1)), 1)
-        sample_count = len(window_pcm) // (2 * channels)
-        if sample_count <= 0:
-            analysis.samples_count = 0
-            analysis.speech_count = 0
-            analysis.mean_rms_dbfs = None
-            return
-
-        import array
-
-        pcm_array = array.array('h')
-        pcm_array.frombytes(window_pcm)
-        if channels > 1:
-            mono_samples = pcm_array[::channels]
-        else:
-            mono_samples = pcm_array
-
-        analysis.samples_count = len(mono_samples)
-        analysis.speech_count = sum(
-            1 for sample in mono_samples if abs(sample) >= 500
+        sample_rate = int(meta.get('sample_rate', 0) or 0)
+        stats = compute_pcm_window_stats(
+            window_pcm,
+            sample_rate=sample_rate,
+            channels=channels,
         )
-        if not mono_samples:
-            analysis.mean_rms_dbfs = None
-            return
-
-        rms = math.sqrt(
-            sum(sample * sample for sample in mono_samples) / len(mono_samples)
-        )
-        if rms <= 0:
-            analysis.mean_rms_dbfs = -120.0
-            return
-
-        analysis.mean_rms_dbfs = round(
-            20 * math.log10(rms / 32768.0),
-            2,
-        )
+        analysis.samples_count = int(stats.get('samples_count') or 0)
+        analysis.speech_count = int(stats.get('speech_count') or 0)
+        mean = stats.get('mean_rms_dbfs')
+        analysis.mean_rms_dbfs = mean if mean is None else float(mean)

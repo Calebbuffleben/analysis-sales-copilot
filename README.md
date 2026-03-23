@@ -65,6 +65,11 @@ docker run -p 50051:50051 audio-pipeline-service
 - `GRPC_WORKERS`: Número de workers do ThreadPoolExecutor (padrão: 10)
 - `STORAGE_DIR`: Diretório para armazenar arquivos (padrão: /app/storage)
 - `LOG_LEVEL`: Nível de logging - DEBUG, INFO, WARNING, ERROR, CRITICAL (padrão: INFO)
+- `GRPC_FEEDBACK_URL`: Host:porta do ingress gRPC de feedback no backend (ex.: `localhost:50052` ou `*.railway.internal:50052`)
+- `AUDIO_BUFFER_WINDOW_SECONDS`, `AUDIO_BUFFER_MIN_WINDOW_SECONDS`, `AUDIO_BUFFER_MIN_INTERVAL_MS`: política de janela deslizante
+- `WHISPER_VAD_FILTER`: `true`/`false` — usa filtro VAD do faster-whisper (padrão: `true`). Desligar para testar hipótese de fala removida pelo VAD.
+- `WHISPER_EMPTY_DIAGNOSTIC_NO_VAD`: `true`/`false` — se `true`, quando o STT vier vazio com VAD ligado, roda uma segunda passagem **só para log** sem VAD (`diag_no_vad_chars`) sem alterar o texto publicado.
+- `WHISPER_LOW_ENERGY_DBFS`: limiar (dBFS) para classificar `low_energy` nos logs quando não há texto (padrão: `-50.0`)
 
 ## Endpoints
 
@@ -74,8 +79,11 @@ docker run -p 50051:50051 audio-pipeline-service
 ## Logs
 
 O serviço loga:
-- Início de cada stream de áudio
-- Cada chunk recebido (com detalhes)
+- Início de cada stream de áudio (inclui `sample_rate`, `channels`, bytes/s do contrato s16le)
+- `🔊 Window ready` — janela pronta para STT: duração, RMS, proporção de amostras “com fala”, pico
+- `📝 Transcription completed` / `📝 STT empty` — resultado do Whisper com motivo aproximado quando vazio (`reason=`)
+- `⏭️ Pipeline skip (empty transcript)` — pipeline interrompido antes da análise quando não há texto
+- `📨 Feedback published` — feedback enviado ao backend (inclui `transcript_chars` e janela em ms)
 - Estatísticas a cada 100 chunks
 - Finalização de streams
 - Erros
