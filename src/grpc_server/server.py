@@ -158,8 +158,8 @@ def start_server(server: grpc.Server, config: Settings) -> None:
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    # Listen on port
-    listen_addr = f'[::]:{config.grpc_port}'
+    # Listen on all interfaces (IPv4). [::] alone can miss IPv4-only clients on private mesh.
+    listen_addr = f'0.0.0.0:{config.grpc_port}'
     server.add_insecure_port(listen_addr)
     server.start()
 
