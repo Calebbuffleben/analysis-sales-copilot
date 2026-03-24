@@ -37,6 +37,7 @@ class TranscriptionService:
         vad_filter: bool = True,
         empty_diagnostic_no_vad: bool = False,
         low_energy_dbfs_threshold: float = -50.0,
+        default_language: Optional[str] = None,
     ) -> None:
         self._model_size = model_size
         self._device = device
@@ -44,6 +45,7 @@ class TranscriptionService:
         self._vad_filter = vad_filter
         self._empty_diagnostic_no_vad = empty_diagnostic_no_vad
         self._low_energy_dbfs_threshold = low_energy_dbfs_threshold
+        self._default_language = self._normalize_language(default_language)
         self._model: Optional[Any] = None
 
     def transcribe(self, window_pcm: bytes, meta: dict) -> TranscriptionResult:
@@ -83,27 +85,21 @@ class TranscriptionService:
         audio = np.frombuffer(window_pcm, dtype=np.int16).astype(np.float32) / 32768.0
 
         model = self._get_model()
-        language = meta.get('language')
+        language = self._normalize_language(meta.get('language'))
+        fallback_language = self._normalize_language(
+            meta.get('fallback_language') or self._default_language,
+        )
 
-        segments, info = model.transcribe(
+        segment_list, transcript_text, confidence, detected_language = self._run_transcribe(
+            model=model,
             audio=audio,
-            language=language or None,
-            beam_size=1,
+            language=language,
             vad_filter=self._vad_filter,
         )
 
-        segment_list = list(segments)
-        transcript_text = ' '.join(
-            segment.text.strip()
-            for segment in segment_list
-            if getattr(segment, 'text', '').strip()
-        ).strip()
-
-        confidence = self._calculate_confidence(segment_list)
-        detected_language = getattr(info, 'language', None)
-
         diagnostic_no_vad_chars = 0
         empty_reason: Optional[str] = None
+        used_fallback_language: Optional[str] = None
 
         if not transcript_text:
             empty_reason = self._classify_empty_transcript(
@@ -115,18 +111,12 @@ class TranscriptionService:
                 and self._vad_filter
                 and len(segment_list) == 0
             ):
-                segments_nv, _info_nv = model.transcribe(
+                nv_list, nv_text, _nv_confidence, _nv_language = self._run_transcribe(
+                    model=model,
                     audio=audio,
-                    language=language or None,
-                    beam_size=1,
+                    language=language,
                     vad_filter=False,
                 )
-                nv_list = list(segments_nv)
-                nv_text = ' '.join(
-                    segment.text.strip()
-                    for segment in nv_list
-                    if getattr(segment, 'text', '').strip()
-                ).strip()
                 diagnostic_no_vad_chars = len(nv_text)
                 if diagnostic_no_vad_chars > 0:
                     logger.info(
@@ -143,27 +133,73 @@ class TranscriptionService:
                         meta.get('meeting_id'),
                     )
 
-            logger.info(
-                '📝 STT empty | reason=%s | meetingId=%s | participantId=%s | '
-                'vad_filter=%s | segments=%s | duration_s=%.3f | pcm_bytes=%s | '
-                'mean_rms_dbfs=%s | speech_ratio=%.4f | peak_abs=%s | diag_no_vad_chars=%s',
-                empty_reason,
-                meta.get('meeting_id'),
-                meta.get('participant_id'),
-                self._vad_filter,
-                len(segment_list),
-                float(stats.get('duration_seconds') or 0.0),
-                stats.get('bytes_len'),
-                stats.get('mean_rms_dbfs'),
-                self._speech_ratio(stats),
-                stats.get('peak_abs'),
-                diagnostic_no_vad_chars,
-            )
-        else:
+            if (
+                not transcript_text
+                and fallback_language
+                and fallback_language != language
+            ):
+                (
+                    fb_list,
+                    fb_text,
+                    fb_confidence,
+                    fb_detected_language,
+                ) = self._run_transcribe(
+                    model=model,
+                    audio=audio,
+                    language=fallback_language,
+                    vad_filter=self._vad_filter,
+                )
+                if fb_text:
+                    segment_list = fb_list
+                    transcript_text = fb_text
+                    confidence = fb_confidence
+                    detected_language = fb_detected_language or fallback_language
+                    empty_reason = None
+                    used_fallback_language = fallback_language
+                    logger.info(
+                        '📝 STT recovered with language fallback | meetingId=%s | '
+                        'participantId=%s | fallback_language=%s | chars=%s | segments=%s',
+                        meta.get('meeting_id'),
+                        meta.get('participant_id'),
+                        fallback_language,
+                        len(transcript_text),
+                        len(segment_list),
+                    )
+                else:
+                    logger.info(
+                        '📝 STT fallback language also empty | meetingId=%s | '
+                        'participantId=%s | fallback_language=%s',
+                        meta.get('meeting_id'),
+                        meta.get('participant_id'),
+                        fallback_language,
+                    )
+
+            if not transcript_text:
+                logger.info(
+                    '📝 STT empty | reason=%s | meetingId=%s | participantId=%s | '
+                    'vad_filter=%s | segments=%s | duration_s=%.3f | pcm_bytes=%s | '
+                    'mean_rms_dbfs=%s | speech_ratio=%.4f | peak_abs=%s | '
+                    'diag_no_vad_chars=%s | fallback_language=%s',
+                    empty_reason,
+                    meta.get('meeting_id'),
+                    meta.get('participant_id'),
+                    self._vad_filter,
+                    len(segment_list),
+                    float(stats.get('duration_seconds') or 0.0),
+                    stats.get('bytes_len'),
+                    stats.get('mean_rms_dbfs'),
+                    self._speech_ratio(stats),
+                    stats.get('peak_abs'),
+                    diagnostic_no_vad_chars,
+                    fallback_language,
+                )
+
+        if transcript_text:
             logger.info(
                 '📝 Transcription completed | meetingId=%s | participantId=%s | '
                 'chars=%s | confidence=%.3f | vad_filter=%s | segments=%s | '
-                'duration_s=%.3f | mean_rms_dbfs=%s',
+                'duration_s=%.3f | mean_rms_dbfs=%s | detected_language=%s | '
+                'used_fallback_language=%s',
                 meta.get('meeting_id'),
                 meta.get('participant_id'),
                 len(transcript_text),
@@ -172,12 +208,15 @@ class TranscriptionService:
                 len(segment_list),
                 float(stats.get('duration_seconds') or 0.0),
                 stats.get('mean_rms_dbfs'),
+                detected_language,
+                used_fallback_language,
             )
 
         return TranscriptionResult(
             text=transcript_text,
             confidence=confidence,
             language=detected_language,
+            used_fallback_language=used_fallback_language,
             segment_count=len(segment_list),
             vad_filter_used=self._vad_filter,
             empty_reason=empty_reason,
@@ -256,3 +295,33 @@ class TranscriptionService:
             return 0.0
 
         return sum(probabilities) / len(probabilities)
+
+    def _normalize_language(self, language: Optional[object]) -> Optional[str]:
+        if language is None:
+            return None
+        value = str(language).strip().lower()
+        return value or None
+
+    def _run_transcribe(
+        self,
+        *,
+        model: Any,
+        audio: Any,
+        language: Optional[str],
+        vad_filter: bool,
+    ) -> tuple[list[Any], str, float, Optional[str]]:
+        segments, info = model.transcribe(
+            audio=audio,
+            language=language or None,
+            beam_size=1,
+            vad_filter=vad_filter,
+        )
+        segment_list = list(segments)
+        transcript_text = ' '.join(
+            segment.text.strip()
+            for segment in segment_list
+            if getattr(segment, 'text', '').strip()
+        ).strip()
+        confidence = self._calculate_confidence(segment_list)
+        detected_language = getattr(info, 'language', None)
+        return segment_list, transcript_text, confidence, detected_language

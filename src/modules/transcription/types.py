@@ -11,6 +11,7 @@ class TranscriptionResult:
     text: str
     confidence: float
     language: Optional[str] = None
+    used_fallback_language: Optional[str] = None
     segment_count: int = 0
     vad_filter_used: bool = True
     empty_reason: Optional[str] = None

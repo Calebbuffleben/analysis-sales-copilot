@@ -70,6 +70,7 @@ docker run -p 50051:50051 audio-pipeline-service
 - `WHISPER_VAD_FILTER`: `true`/`false` — usa filtro VAD do faster-whisper (padrão: `true`). Desligar para testar hipótese de fala removida pelo VAD.
 - `WHISPER_EMPTY_DIAGNOSTIC_NO_VAD`: `true`/`false` — se `true`, quando o STT vier vazio com VAD ligado, roda uma segunda passagem **só para log** sem VAD (`diag_no_vad_chars`) sem alterar o texto publicado.
 - `WHISPER_LOW_ENERGY_DBFS`: limiar (dBFS) para classificar `low_energy` nos logs quando não há texto (padrão: `-50.0`)
+- `WHISPER_DEFAULT_LANGUAGE`: idioma opcional do Whisper (ex.: `pt`). Se definido, vira fallback controlado para janelas vazias; sem essa variável o serviço usa autodetecção e reaproveita o último idioma bem-sucedido do stream só como tentativa de recuperação.
 
 ## Endpoints
 
@@ -81,7 +82,8 @@ docker run -p 50051:50051 audio-pipeline-service
 O serviço loga:
 - Início de cada stream de áudio (inclui `sample_rate`, `channels`, bytes/s do contrato s16le)
 - `🔊 Window ready` — janela pronta para STT: duração, RMS, proporção de amostras “com fala”, pico
-- `📝 Transcription completed` / `📝 STT empty` — resultado do Whisper com motivo aproximado quando vazio (`reason=`)
+- `📝 Transcription completed` / `📝 STT empty` — resultado do Whisper com motivo aproximado quando vazio (`reason=`), idioma detectado e fallback usado
+- `📝 STT recovered with language fallback` — janela que estava vazia na autodetecção mas recuperou texto ao repetir com idioma conhecido
 - `⏭️ Pipeline skip (empty transcript)` — pipeline interrompido antes da análise quando não há texto
 - `📨 Feedback published` — feedback enviado ao backend (inclui `transcript_chars` e janela em ms)
 - Estatísticas a cada 100 chunks

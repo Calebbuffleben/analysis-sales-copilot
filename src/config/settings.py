@@ -24,6 +24,7 @@ class Settings:
     whisper_vad_filter: bool = True
     whisper_empty_diagnostic_no_vad: bool = False
     whisper_low_energy_dbfs: float = -50.0
+    whisper_default_language: Optional[str] = None
     log_level: str = 'INFO'
     proto_dir: Optional[str] = None
 
@@ -74,6 +75,9 @@ class Settings:
             whisper_low_energy_dbfs=float(
                 os.getenv('WHISPER_LOW_ENERGY_DBFS', '-50.0'),
             ),
+            whisper_default_language=cls._normalize_language(
+                os.getenv('WHISPER_DEFAULT_LANGUAGE'),
+            ),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             proto_dir=os.getenv('PROTO_DIR'),
         )
@@ -89,6 +93,13 @@ class Settings:
         if u.startswith('http://'):
             return u[7:].split('/', 1)[0]
         return u
+
+    @staticmethod
+    def _normalize_language(raw: Optional[str]) -> Optional[str]:
+        if raw is None:
+            return None
+        value = raw.strip().lower()
+        return value or None
 
     def validate(self) -> None:
         """Validate settings values."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 from ..audio_buffer.audio_diagnostics import compute_pcm_window_stats
 from ..backend_feedback.grpc_feedback_client import BackendFeedbackClient
@@ -22,10 +23,13 @@ class TranscriptionPipelineService:
         transcription_service: TranscriptionService,
         text_analysis_service: TextAnalysisService,
         backend_feedback_client: BackendFeedbackClient,
+        default_language: Optional[str] = None,
     ) -> None:
         self._transcription_service = transcription_service
         self._text_analysis_service = text_analysis_service
         self._backend_feedback_client = backend_feedback_client
+        self._default_language = self._normalize_language(default_language)
+        self._stream_language_hints: dict[str, str] = {}
 
     def _on_window_ready(
         self,
@@ -34,30 +38,46 @@ class TranscriptionPipelineService:
         meta: dict,
     ) -> None:
         """Callback invoked by SlidingWindowWorker when a window is ready."""
-        transcription = self._transcription_service.transcribe(window_pcm, meta)
+        enriched_meta = dict(meta)
+        fallback_language = (
+            self._stream_language_hints.get(stream_key) or self._default_language
+        )
+        if fallback_language:
+            enriched_meta['fallback_language'] = fallback_language
+
+        transcription = self._transcription_service.transcribe(window_pcm, enriched_meta)
         if not transcription.text.strip():
             logger.info(
                 '⏭️ Pipeline skip (empty transcript) | stream_key=%s | reason=%s | '
-                'vad_filter=%s | segments=%s',
+                'vad_filter=%s | segments=%s | fallback_language=%s',
                 stream_key,
                 transcription.empty_reason,
                 transcription.vad_filter_used,
                 transcription.segment_count,
+                fallback_language,
             )
             return
 
+        if transcription.language and stream_key not in self._stream_language_hints:
+            self._stream_language_hints[stream_key] = transcription.language
+            logger.info(
+                '📝 STT stream language hint learned | stream_key=%s | language=%s',
+                stream_key,
+                transcription.language,
+            )
+
         chunk = TranscriptionChunk(
-            meeting_id=str(meta['meeting_id']),
-            participant_id=str(meta['participant_id']),
-            track=str(meta['track']),
+            meeting_id=str(enriched_meta['meeting_id']),
+            participant_id=str(enriched_meta['participant_id']),
+            track=str(enriched_meta['track']),
             text=transcription.text,
             confidence=transcription.confidence,
-            timestamp_ms=int(meta['window_end_ms']),
-            window_start_ms=int(meta['window_start_ms']),
-            window_end_ms=int(meta['window_end_ms']),
+            timestamp_ms=int(enriched_meta['window_end_ms']),
+            window_start_ms=int(enriched_meta['window_start_ms']),
+            window_end_ms=int(enriched_meta['window_end_ms']),
         )
         analysis = self._text_analysis_service.analyze(chunk)
-        self._apply_audio_window_stats(analysis, window_pcm, meta)
+        self._apply_audio_window_stats(analysis, window_pcm, enriched_meta)
         self._handle_transcript(stream_key, chunk, analysis)
 
     def _handle_transcript(
@@ -117,3 +137,9 @@ class TranscriptionPipelineService:
         analysis.speech_count = int(stats.get('speech_count') or 0)
         mean = stats.get('mean_rms_dbfs')
         analysis.mean_rms_dbfs = mean if mean is None else float(mean)
+
+    def _normalize_language(self, language: Optional[object]) -> Optional[str]:
+        if language is None:
+            return None
+        value = str(language).strip().lower()
+        return value or None
