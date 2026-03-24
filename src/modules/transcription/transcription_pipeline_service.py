@@ -39,8 +39,14 @@ class TranscriptionPipelineService:
     ) -> None:
         """Callback invoked by SlidingWindowWorker when a window is ready."""
         enriched_meta = dict(meta)
+        configured_language = self._default_language
+        if configured_language:
+            enriched_meta['language'] = configured_language
+
         fallback_language = (
-            self._stream_language_hints.get(stream_key) or self._default_language
+            self._stream_language_hints.get(stream_key)
+            if not configured_language
+            else configured_language
         )
         if fallback_language:
             enriched_meta['fallback_language'] = fallback_language
@@ -49,16 +55,21 @@ class TranscriptionPipelineService:
         if not transcription.text.strip():
             logger.info(
                 '⏭️ Pipeline skip (empty transcript) | stream_key=%s | reason=%s | '
-                'vad_filter=%s | segments=%s | fallback_language=%s',
+                'vad_filter=%s | segments=%s | language=%s | fallback_language=%s',
                 stream_key,
                 transcription.empty_reason,
                 transcription.vad_filter_used,
                 transcription.segment_count,
+                enriched_meta.get('language'),
                 fallback_language,
             )
             return
 
-        if transcription.language and stream_key not in self._stream_language_hints:
+        if (
+            not configured_language
+            and transcription.language
+            and stream_key not in self._stream_language_hints
+        ):
             self._stream_language_hints[stream_key] = transcription.language
             logger.info(
                 '📝 STT stream language hint learned | stream_key=%s | language=%s',

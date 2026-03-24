@@ -70,7 +70,7 @@ docker run -p 50051:50051 audio-pipeline-service
 - `WHISPER_VAD_FILTER`: `true`/`false` — usa filtro VAD do faster-whisper (padrão: `true`). Desligar para testar hipótese de fala removida pelo VAD.
 - `WHISPER_EMPTY_DIAGNOSTIC_NO_VAD`: `true`/`false` — se `true`, quando o STT vier vazio com VAD ligado, roda uma segunda passagem **só para log** sem VAD (`diag_no_vad_chars`) sem alterar o texto publicado.
 - `WHISPER_LOW_ENERGY_DBFS`: limiar (dBFS) para classificar `low_energy` nos logs quando não há texto (padrão: `-50.0`)
-- `WHISPER_DEFAULT_LANGUAGE`: idioma opcional do Whisper (ex.: `pt`). Se definido, vira fallback controlado para janelas vazias; sem essa variável o serviço usa autodetecção e reaproveita o último idioma bem-sucedido do stream só como tentativa de recuperação.
+- `WHISPER_DEFAULT_LANGUAGE`: idioma opcional do Whisper (ex.: `pt`). Se definido, o serviço fixa esse idioma em todas as janelas; sem essa variável o serviço usa autodetecção e só reaproveita o último idioma bem-sucedido do stream como fallback de recuperação.
 
 ## Endpoints
 

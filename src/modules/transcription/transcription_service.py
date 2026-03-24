@@ -85,7 +85,9 @@ class TranscriptionService:
         audio = np.frombuffer(window_pcm, dtype=np.int16).astype(np.float32) / 32768.0
 
         model = self._get_model()
-        language = self._normalize_language(meta.get('language'))
+        language = self._normalize_language(
+            meta.get('language') or self._default_language,
+        )
         fallback_language = self._normalize_language(
             meta.get('fallback_language') or self._default_language,
         )
