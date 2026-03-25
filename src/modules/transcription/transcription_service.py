@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
 from ..audio_buffer.audio_diagnostics import compute_pcm_window_stats
@@ -47,6 +49,14 @@ class TranscriptionService:
         self._low_energy_dbfs_threshold = low_energy_dbfs_threshold
         self._default_language = self._normalize_language(default_language)
         self._model: Optional[Any] = None
+        # faster-whisper / CTranslate2 model is not safe for concurrent transcribe
+        self._model_lock = threading.Lock()
+        self._diagnostic_executor: Optional[ThreadPoolExecutor] = None
+        if empty_diagnostic_no_vad:
+            self._diagnostic_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix='stt-no-vad-diag',
+            )
 
     def transcribe(self, window_pcm: bytes, meta: dict) -> TranscriptionResult:
         """Transcribe a single PCM audio window.
@@ -58,6 +68,10 @@ class TranscriptionService:
         Returns:
             A `TranscriptionResult` with text and confidence.
         """
+        with self._model_lock:
+            return self._transcribe_inner(window_pcm, meta)
+
+    def _transcribe_inner(self, window_pcm: bytes, meta: dict) -> TranscriptionResult:
         sample_rate = int(meta.get('sample_rate', 0) or 0)
         channels = max(int(meta.get('channels', 1)), 1)
 
@@ -109,31 +123,17 @@ class TranscriptionService:
                 segment_count=len(segment_list),
             )
             if (
-                self._empty_diagnostic_no_vad
+                self._diagnostic_executor is not None
+                and self._empty_diagnostic_no_vad
                 and self._vad_filter
                 and len(segment_list) == 0
             ):
-                nv_list, nv_text, _nv_confidence, _nv_language = self._run_transcribe(
-                    model=model,
-                    audio=audio,
-                    language=language,
-                    vad_filter=False,
+                # Off hot path: second pass runs in a thread; does not block next window.
+                self._diagnostic_executor.submit(
+                    self._run_diagnostic_no_vad_only,
+                    bytes(window_pcm),
+                    dict(meta),
                 )
-                diagnostic_no_vad_chars = len(nv_text)
-                if diagnostic_no_vad_chars > 0:
-                    logger.info(
-                        '📝 STT diagnostic | no-VAD rerun produced text | '
-                        'chars=%s | meetingId=%s | suggests=VAD_or_filtering',
-                        diagnostic_no_vad_chars,
-                        meta.get('meeting_id'),
-                    )
-                    if empty_reason == 'empty_segments_vad_on':
-                        empty_reason = 'vad_likely_suppressed_speech'
-                else:
-                    logger.info(
-                        '📝 STT diagnostic | no-VAD rerun also empty | meetingId=%s',
-                        meta.get('meeting_id'),
-                    )
 
             if (
                 not transcript_text
@@ -224,6 +224,40 @@ class TranscriptionService:
             empty_reason=empty_reason,
             diagnostic_no_vad_chars=diagnostic_no_vad_chars,
         )
+
+    def _run_diagnostic_no_vad_only(self, window_pcm: bytes, meta: dict) -> None:
+        """Second STT pass without VAD for logging only (does not affect published text)."""
+        with self._model_lock:
+            try:
+                np = self._import_numpy()
+                audio = np.frombuffer(window_pcm, dtype=np.int16).astype(np.float32) / 32768.0
+                model = self._get_model()
+                language = self._normalize_language(
+                    meta.get('language') or self._default_language,
+                )
+                _nv_list, nv_text, _c, _l = self._run_transcribe(
+                    model=model,
+                    audio=audio,
+                    language=language,
+                    vad_filter=False,
+                )
+                if nv_text:
+                    logger.info(
+                        '📝 STT diagnostic | no-VAD rerun produced text | '
+                        'chars=%s | meetingId=%s | suggests=VAD_or_filtering',
+                        len(nv_text),
+                        meta.get('meeting_id'),
+                    )
+                else:
+                    logger.info(
+                        '📝 STT diagnostic | no-VAD rerun also empty | meetingId=%s',
+                        meta.get('meeting_id'),
+                    )
+            except Exception:
+                logger.exception(
+                    '📝 STT diagnostic | no-VAD rerun failed | meetingId=%s',
+                    meta.get('meeting_id'),
+                )
 
     def _speech_ratio(self, stats: dict) -> float:
         samples = int(stats.get('samples_count') or 0)

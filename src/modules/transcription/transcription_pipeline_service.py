@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 from ..audio_buffer.audio_diagnostics import compute_pcm_window_stats
@@ -37,7 +38,17 @@ class TranscriptionPipelineService:
         window_pcm: bytes,
         meta: dict,
     ) -> None:
-        """Callback invoked by SlidingWindowWorker when a window is ready."""
+        """Backward-compatible alias for SlidingWindowWorker callback."""
+        self.process_window(stream_key, window_pcm, meta)
+
+    def process_window(
+        self,
+        stream_key: str,
+        window_pcm: bytes,
+        meta: dict,
+    ) -> None:
+        """Process one ready window: STT, analysis, publish."""
+        t_pipeline_start = time.perf_counter()
         enriched_meta = dict(meta)
         configured_language = self._default_language
         if configured_language:
@@ -51,17 +62,22 @@ class TranscriptionPipelineService:
         if fallback_language:
             enriched_meta['fallback_language'] = fallback_language
 
+        t_stt_start = time.perf_counter()
         transcription = self._transcription_service.transcribe(window_pcm, enriched_meta)
+        t_stt_end = time.perf_counter()
         if not transcription.text.strip():
             logger.info(
                 '⏭️ Pipeline skip (empty transcript) | stream_key=%s | reason=%s | '
-                'vad_filter=%s | segments=%s | language=%s | fallback_language=%s',
+                'vad_filter=%s | segments=%s | language=%s | fallback_language=%s | '
+                'stt_ms=%.1f | total_ms=%.1f',
                 stream_key,
                 transcription.empty_reason,
                 transcription.vad_filter_used,
                 transcription.segment_count,
                 enriched_meta.get('language'),
                 fallback_language,
+                (t_stt_end - t_stt_start) * 1000.0,
+                (t_stt_end - t_pipeline_start) * 1000.0,
             )
             return
 
@@ -87,9 +103,22 @@ class TranscriptionPipelineService:
             window_start_ms=int(enriched_meta['window_start_ms']),
             window_end_ms=int(enriched_meta['window_end_ms']),
         )
+        t_ana_start = time.perf_counter()
         analysis = self._text_analysis_service.analyze(chunk)
         self._apply_audio_window_stats(analysis, window_pcm, enriched_meta)
+        t_ana_end = time.perf_counter()
+        t_pub_start = time.perf_counter()
         self._handle_transcript(stream_key, chunk, analysis)
+        t_pub_end = time.perf_counter()
+        logger.info(
+            '⏱️ Pipeline latency | stream_key=%s | stt_ms=%.1f | analysis_ms=%.1f | '
+            'publish_ms=%.1f | total_ms=%.1f',
+            stream_key,
+            (t_stt_end - t_stt_start) * 1000.0,
+            (t_ana_end - t_ana_start) * 1000.0,
+            (t_pub_end - t_pub_start) * 1000.0,
+            (t_pub_end - t_pipeline_start) * 1000.0,
+        )
 
     def _handle_transcript(
         self,

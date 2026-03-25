@@ -20,6 +20,7 @@ from ..modules.audio_buffer.service import AudioBufferService
 from ..modules.audio_buffer.sliding_worker import SlidingWindowWorker
 from ..modules.backend_feedback.grpc_feedback_client import BackendFeedbackClient
 from ..modules.text_analysis.text_analysis_service import TextAnalysisService
+from ..modules.transcription.ready_window_dispatcher import ReadyWindowDispatcher
 from ..modules.transcription.transcription_pipeline_service import (
     TranscriptionPipelineService,
 )
@@ -129,8 +130,15 @@ def create_server(config: Settings) -> grpc.Server:
         backend_feedback_client=backend_feedback_client,
         default_language=config.whisper_default_language,
     )
+    ready_window_dispatcher = ReadyWindowDispatcher(
+        transcription_pipeline_service.process_window,
+        max_queue_size=config.window_queue_max_size,
+        worker_threads=config.window_worker_threads,
+        max_age_ms=config.window_max_age_ms,
+        low_priority_speech_ratio_below=config.window_low_priority_speech_ratio_below,
+    )
     audio_buffer_service.register_window_callback(
-        transcription_pipeline_service._on_window_ready,
+        lambda sk, pcm, meta: ready_window_dispatcher.enqueue(sk, pcm, meta),
     )
     audio_service = AudioService(audio_buffer_service=audio_buffer_service)
     servicer = AudioPipelineServicer(audio_service)
@@ -149,6 +157,14 @@ def create_server(config: Settings) -> grpc.Server:
         config.whisper_empty_diagnostic_no_vad,
         config.whisper_low_energy_dbfs,
         config.whisper_default_language,
+    )
+    logger.info(
+        'Window queue | WINDOW_QUEUE_MAX_SIZE=%s | WINDOW_WORKER_THREADS=%s | '
+        'WINDOW_MAX_AGE_MS=%s | WINDOW_LOW_PRIORITY_SPEECH_RATIO_BELOW=%s',
+        config.window_queue_max_size,
+        config.window_worker_threads,
+        config.window_max_age_ms,
+        config.window_low_priority_speech_ratio_below,
     )
 
     return server

@@ -25,6 +25,11 @@ class Settings:
     whisper_empty_diagnostic_no_vad: bool = False
     whisper_low_energy_dbfs: float = -50.0
     whisper_default_language: Optional[str] = None
+    # Ready-window queue (bounded realtime processing)
+    window_queue_max_size: int = 8
+    window_worker_threads: int = 2
+    window_max_age_ms: int = 25_000
+    window_low_priority_speech_ratio_below: float = 0.02
     log_level: str = 'INFO'
     proto_dir: Optional[str] = None
 
@@ -78,6 +83,12 @@ class Settings:
             whisper_default_language=cls._normalize_language(
                 os.getenv('WHISPER_DEFAULT_LANGUAGE'),
             ),
+            window_queue_max_size=int(os.getenv('WINDOW_QUEUE_MAX_SIZE', '8')),
+            window_worker_threads=int(os.getenv('WINDOW_WORKER_THREADS', '2')),
+            window_max_age_ms=int(os.getenv('WINDOW_MAX_AGE_MS', '25000')),
+            window_low_priority_speech_ratio_below=float(
+                os.getenv('WINDOW_LOW_PRIORITY_SPEECH_RATIO_BELOW', '0.02'),
+            ),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             proto_dir=os.getenv('PROTO_DIR'),
         )
@@ -129,6 +140,23 @@ class Settings:
         if not -120.0 <= self.whisper_low_energy_dbfs <= 0.0:
             raise ValueError(
                 f'Invalid WHISPER_LOW_ENERGY_DBFS: {self.whisper_low_energy_dbfs}',
+            )
+        if self.window_queue_max_size < 1:
+            raise ValueError(
+                f'Invalid WINDOW_QUEUE_MAX_SIZE: {self.window_queue_max_size}',
+            )
+        if self.window_worker_threads < 1:
+            raise ValueError(
+                f'Invalid WINDOW_WORKER_THREADS: {self.window_worker_threads}',
+            )
+        if self.window_max_age_ms < 1000:
+            raise ValueError(
+                f'Invalid WINDOW_MAX_AGE_MS: {self.window_max_age_ms}',
+            )
+        if not 0.0 <= self.window_low_priority_speech_ratio_below <= 1.0:
+            raise ValueError(
+                'Invalid WINDOW_LOW_PRIORITY_SPEECH_RATIO_BELOW: '
+                f'{self.window_low_priority_speech_ratio_below}',
             )
 
 

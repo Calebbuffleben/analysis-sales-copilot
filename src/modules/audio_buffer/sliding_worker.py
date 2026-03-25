@@ -122,6 +122,10 @@ class SlidingWindowWorker:
             sample_rate=sr,
             channels=ch,
         )
+        samples_n = max(int(wstats.get('samples_count') or 0), 1)
+        speech_ratio = float(wstats.get('speech_count') or 0) / float(samples_n)
+        enriched_meta['speech_ratio'] = speech_ratio
+        enriched_meta['mean_rms_dbfs'] = wstats.get('mean_rms_dbfs')
         logger.info(
             '🔊 Window ready | stream_key=%s | pcm_bytes=%s | duration_ms=%s | '
             'sample_rate=%s | channels=%s | window_start_ms=%s | window_end_ms=%s | '
@@ -135,7 +139,7 @@ class SlidingWindowWorker:
             int(meta.get('window_end_ms', 0)),
             int(meta.get('sequence', 0)),
             wstats.get('mean_rms_dbfs'),
-            (float(wstats.get('speech_count') or 0) / max(int(wstats.get('samples_count') or 0), 1)),
+            speech_ratio,
             wstats.get('peak_abs'),
         )
 
