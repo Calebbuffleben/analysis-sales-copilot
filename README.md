@@ -73,7 +73,8 @@ docker run -p 50051:50051 audio-pipeline-service
 - `WINDOW_WORKER_THREADS`: threads que consomem a fila e rodam `TranscriptionPipelineService.process_window` (padrão: `2`)
 - `WINDOW_MAX_AGE_MS`: descarta janelas cuja idade (`now - window_end_ms`) exceda este valor ao enfileirar ou ao processar (padrão: `25000`)
 - `WINDOW_LOW_PRIORITY_SPEECH_RATIO_BELOW`: abaixo deste `speech_ratio` a janela é considerada baixa prioridade para eviction quando a fila está cheia (padrão: `0.02`)
-- `WHISPER_LOW_ENERGY_DBFS`: limiar (dBFS) para classificar `low_energy` nos logs quando não há texto (padrão: `-50.0`)
+- `PRELOAD_ML_MODELS`: `true`/`false` — se `true` (padrão), o processo carrega o Whisper e o modelo de embeddings (`sentence-transformers`) **antes** de subir o gRPC, evitando atraso de vários minutos na primeira janela (download HF + init). Em ambientes efêmeros sem cache de modelo, deixe `true`.
+- `WHISPER_LOW_ENERGY_DBFS`: limiar (dBFS); janelas com RMS médio abaixo disso **não** chamam o Whisper (atalho `low_energy_precheck`), só logs — reduz fila e CPU em silêncio absoluto.
 - `WHISPER_DEFAULT_LANGUAGE`: idioma opcional do Whisper (ex.: `pt`). Se definido, o serviço fixa esse idioma em todas as janelas; sem essa variável o serviço usa autodetecção e só reaproveita o último idioma bem-sucedido do stream como fallback de recuperação.
 
 ## Endpoints
@@ -89,6 +90,7 @@ O serviço loga:
 - `📥 Window dequeue` — worker retirou a janela da fila; inclui `queue_wait_ms`
 - `⏱️ Pipeline latency` — tempos aproximados de STT, análise e publish por janela
 - `📝 Transcription completed` / `📝 STT empty` — resultado do Whisper com motivo aproximado quando vazio (`reason=`), idioma detectado e fallback usado
+- `📝 STT skip | reason=low_energy_precheck` — RMS abaixo do limiar; Whisper não foi chamado
 - `📝 STT recovered with language fallback` — janela que estava vazia na autodetecção mas recuperou texto ao repetir com idioma conhecido
 - `⏭️ Pipeline skip (empty transcript)` — pipeline interrompido antes da análise quando não há texto
 - `📨 Feedback published` — feedback enviado ao backend (inclui `transcript_chars` e janela em ms)

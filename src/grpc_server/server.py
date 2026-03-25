@@ -4,6 +4,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from concurrent import futures
 from typing import Optional
 
@@ -79,6 +80,30 @@ def validate_proto_code(proto_dir: Optional[str] = None) -> bool:
             return False
 
     return True
+
+
+def _warmup_ml_models(
+    transcription_service: TranscriptionService,
+    text_analysis_service: TextAnalysisService,
+) -> None:
+    """Load Whisper and SBERT before the first audio window (avoids cold-start lag)."""
+    t0 = time.perf_counter()
+    try:
+        transcription_service.preload_model()
+    except Exception:
+        logger.exception('Whisper preload failed — first stream may be slow')
+    t1 = time.perf_counter()
+    try:
+        text_analysis_service.ensure_model_loaded()
+    except Exception:
+        logger.exception('Sentence-transformers preload failed — first analysis may be slow')
+    t2 = time.perf_counter()
+    logger.info(
+        'ML preload complete | whisper_s=%.2f | sbert_s=%.2f | total_s=%.2f',
+        t1 - t0,
+        t2 - t1,
+        t2 - t0,
+    )
 
 
 def create_server(config: Settings) -> grpc.Server:
@@ -166,6 +191,12 @@ def create_server(config: Settings) -> grpc.Server:
         config.window_max_age_ms,
         config.window_low_priority_speech_ratio_below,
     )
+
+    if config.preload_ml_models:
+        logger.info('PRELOAD_ML_MODELS=true — loading Whisper + embedding model...')
+        _warmup_ml_models(transcription_service, text_analysis_service)
+    else:
+        logger.info('PRELOAD_ML_MODELS=false — models load on first use')
 
     return server
 

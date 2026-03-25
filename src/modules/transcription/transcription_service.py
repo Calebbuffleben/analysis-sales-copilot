@@ -95,6 +95,27 @@ class TranscriptionService:
             channels=channels,
         )
 
+        # Skip Whisper entirely for clearly inaudible windows (saves seconds per window
+        # and avoids loading the model on silence-only paths).
+        mean_rms = stats.get('mean_rms_dbfs')
+        if mean_rms is not None and mean_rms < self._low_energy_dbfs_threshold:
+            logger.info(
+                '📝 STT skip | reason=low_energy_precheck | meetingId=%s | '
+                'participantId=%s | mean_rms_dbfs=%s | threshold=%s',
+                meta.get('meeting_id'),
+                meta.get('participant_id'),
+                mean_rms,
+                self._low_energy_dbfs_threshold,
+            )
+            return TranscriptionResult(
+                text='',
+                confidence=0.0,
+                language=None,
+                segment_count=0,
+                vad_filter_used=self._vad_filter,
+                empty_reason='low_energy',
+            )
+
         np = self._import_numpy()
         audio = np.frombuffer(window_pcm, dtype=np.int16).astype(np.float32) / 32768.0
 
@@ -304,6 +325,17 @@ class TranscriptionService:
             )
 
         return self._model
+
+    def preload_model(self) -> None:
+        """Load the Whisper model into memory (call once at process startup)."""
+        with self._model_lock:
+            self._get_model()
+        logger.info(
+            'Whisper model ready | model_size=%s | device=%s | compute_type=%s',
+            self._model_size,
+            self._device,
+            self._compute_type,
+        )
 
     def _import_numpy(self) -> Any:
         """Import numpy lazily to avoid hard runtime dependency during module import."""

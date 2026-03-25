@@ -32,6 +32,9 @@ class Settings:
     window_low_priority_speech_ratio_below: float = 0.02
     log_level: str = 'INFO'
     proto_dir: Optional[str] = None
+    # Load Whisper + sentence-transformers before accepting traffic (avoids multi-minute
+    # delay on first real-time window from HF download + model init).
+    preload_ml_models: bool = True
 
     @classmethod
     def from_env(cls) -> 'Settings':
@@ -91,6 +94,7 @@ class Settings:
             ),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             proto_dir=os.getenv('PROTO_DIR'),
+            preload_ml_models=os.getenv('PRELOAD_ML_MODELS', 'true').lower() == 'true',
         )
 
     @staticmethod
