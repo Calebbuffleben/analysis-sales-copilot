@@ -63,6 +63,7 @@ docker run -p 50051:50051 audio-pipeline-service
 
 - `GRPC_PORT`: Porta do servidor gRPC (padrão: 50051)
 - `GRPC_WORKERS`: Número de workers do ThreadPoolExecutor (padrão: 10)
+- `STT_PROCESS_WORKERS`: Paralelismo real do STT (padrão: `0`). `0` = um único processo Python com lock no modelo (comportamento legado). `N>=1` = `N` processos worker, cada um com seu próprio `WhisperModel` (`ProcessPoolExecutor`). Combine com `WINDOW_WORKER_THREADS` para throughput (ex.: 2 threads na fila de janelas + 2 processos STT).
 - `STORAGE_DIR`: Diretório para armazenar arquivos (padrão: /app/storage)
 - `LOG_LEVEL`: Nível de logging - DEBUG, INFO, WARNING, ERROR, CRITICAL (padrão: INFO)
 - `GRPC_FEEDBACK_URL`: Host:porta do ingress gRPC de feedback no backend (ex.: `localhost:50052` ou `*.railway.internal:50052`)
@@ -73,6 +74,8 @@ docker run -p 50051:50051 audio-pipeline-service
 - `WINDOW_WORKER_THREADS`: threads que consomem a fila e rodam `TranscriptionPipelineService.process_window` (padrão: `2`)
 - `WINDOW_MAX_AGE_MS`: descarta janelas cuja idade (`now - window_end_ms`) exceda este valor ao enfileirar ou ao processar (padrão: `25000`)
 - `WINDOW_LOW_PRIORITY_SPEECH_RATIO_BELOW`: abaixo deste `speech_ratio` a janela é considerada baixa prioridade para eviction quando a fila está cheia (padrão: `0.02`)
+- `METRICS_ENABLED`: habilita endpoint Prometheus `/metrics` (padrão: `true`)
+- `METRICS_PORT`: porta do endpoint Prometheus `/metrics` (padrão: `9100`)
 - `PRELOAD_ML_MODELS`: `true`/`false` — se `true` (padrão), o processo carrega o Whisper e o modelo de embeddings (`sentence-transformers`) **antes** de subir o gRPC, evitando atraso de vários minutos na primeira janela (download HF + init). Em ambientes efêmeros sem cache de modelo, deixe `true`.
 - `WHISPER_LOW_ENERGY_DBFS`: limiar (dBFS); janelas com RMS médio abaixo disso **não** chamam o Whisper (atalho `low_energy_precheck`), só logs — reduz fila e CPU em silêncio absoluto.
 - `WHISPER_DEFAULT_LANGUAGE`: idioma opcional do Whisper (ex.: `pt`). Se definido, o serviço fixa esse idioma em todas as janelas; sem essa variável o serviço usa autodetecção e só reaproveita o último idioma bem-sucedido do stream como fallback de recuperação.
@@ -81,6 +84,7 @@ docker run -p 50051:50051 audio-pipeline-service
 
 - **gRPC**: `0.0.0.0:50051` (dentro do container)
 - **gRPC**: `localhost:50051` (do host)
+- **Metrics (Prometheus)**: `http://<host>:<METRICS_PORT>/metrics` (padrão: `9100`)
 
 ## Logs
 
@@ -88,7 +92,7 @@ O serviço loga:
 - Início de cada stream de áudio (inclui `sample_rate`, `channels`, bytes/s do contrato s16le)
 - `🔊 Window ready` — janela pronta para STT: duração, RMS, proporção de amostras “com fala”, pico (metadados incluem `speech_ratio` / `mean_rms_dbfs` para priorização)
 - `📥 Window dequeue` — worker retirou a janela da fila; inclui `queue_wait_ms`
-- `⏱️ Pipeline latency` — tempos aproximados de STT, análise e publish por janela
+- `⏱️ Pipeline latency` — tempos aproximados de STT, análise e enqueue de publish por janela
 - `📝 Transcription completed` / `📝 STT empty` — resultado do Whisper com motivo aproximado quando vazio (`reason=`), idioma detectado e fallback usado
 - `📝 STT skip | reason=low_energy_precheck` — RMS abaixo do limiar; Whisper não foi chamado
 - `📝 STT recovered with language fallback` — janela que estava vazia na autodetecção mas recuperou texto ao repetir com idioma conhecido

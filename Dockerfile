@@ -35,5 +35,8 @@ RUN python -m grpc_tools.protoc \
 # Expor porta gRPC
 EXPOSE 50051
 
+# Expor porta de métricas Prometheus
+EXPOSE 9100
+
 # Comando para iniciar o servidor
 CMD ["python", "src/main.py"]

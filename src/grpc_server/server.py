@@ -20,7 +20,9 @@ from ..handlers.audio_handler import AudioPipelineServicer
 from ..modules.audio_buffer.service import AudioBufferService
 from ..modules.audio_buffer.sliding_worker import SlidingWindowWorker
 from ..modules.backend_feedback.grpc_feedback_client import BackendFeedbackClient
+from ..modules.backend_feedback.publish_dispatcher import PublishDispatcher
 from ..modules.text_analysis.text_analysis_service import TextAnalysisService
+from ..modules.transcription.degradation_controller import DegradationController
 from ..modules.transcription.ready_window_dispatcher import ReadyWindowDispatcher
 from ..modules.transcription.transcription_pipeline_service import (
     TranscriptionPipelineService,
@@ -120,6 +122,23 @@ def create_server(config: Settings) -> grpc.Server:
     if not validate_proto_code():
         raise RuntimeError("Failed to validate or generate proto code")
 
+    # Expose Prometheus metrics endpoint (HTTP /metrics).
+    # This is best-effort: if the dependency is missing, we just log and proceed.
+    if config.metrics_enabled:
+        try:
+            from prometheus_client import start_http_server
+
+            start_http_server(config.metrics_port)
+            logger.info(
+                '📈 Prometheus /metrics enabled | port=%s',
+                config.metrics_port,
+            )
+        except Exception:
+            logger.warning(
+                'Prometheus metrics disabled (dependency missing?): port=%s',
+                config.metrics_port,
+            )
+
     # Create server with thread pool
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=config.grpc_workers)
@@ -142,6 +161,7 @@ def create_server(config: Settings) -> grpc.Server:
         empty_diagnostic_no_vad=config.whisper_empty_diagnostic_no_vad,
         low_energy_dbfs_threshold=config.whisper_low_energy_dbfs,
         default_language=config.whisper_default_language,
+        process_workers=config.stt_process_workers,
     )
     text_analysis_service = TextAnalysisService()
     backend_feedback_client = BackendFeedbackClient(
@@ -149,10 +169,18 @@ def create_server(config: Settings) -> grpc.Server:
         enabled=config.grpc_feedback_enabled,
         timeout_seconds=config.grpc_feedback_timeout_seconds,
     )
+    publish_dispatcher = PublishDispatcher(
+        backend_feedback_client.publish_feedback,
+        max_queue_size=config.publish_queue_max_size,
+        worker_threads=config.publish_worker_threads,
+        max_event_age_ms=config.publish_max_age_ms,
+        retry_limit=config.publish_retry_limit,
+        retry_backoff_ms=config.publish_retry_backoff_ms,
+    )
     transcription_pipeline_service = TranscriptionPipelineService(
         transcription_service=transcription_service,
         text_analysis_service=text_analysis_service,
-        backend_feedback_client=backend_feedback_client,
+        publish_dispatcher=publish_dispatcher,
         default_language=config.whisper_default_language,
     )
     ready_window_dispatcher = ReadyWindowDispatcher(
@@ -176,8 +204,10 @@ def create_server(config: Settings) -> grpc.Server:
 
     logger.info(f"Servidor gRPC criado com {config.grpc_workers} workers")
     logger.info(
-        'STT config | WHISPER_VAD_FILTER=%s | WHISPER_EMPTY_DIAGNOSTIC_NO_VAD=%s | '
-        'WHISPER_LOW_ENERGY_DBFS=%s | WHISPER_DEFAULT_LANGUAGE=%s',
+        'STT config | STT_PROCESS_WORKERS=%s | WHISPER_VAD_FILTER=%s | '
+        'WHISPER_EMPTY_DIAGNOSTIC_NO_VAD=%s | WHISPER_LOW_ENERGY_DBFS=%s | '
+        'WHISPER_DEFAULT_LANGUAGE=%s',
+        config.stt_process_workers,
         config.whisper_vad_filter,
         config.whisper_empty_diagnostic_no_vad,
         config.whisper_low_energy_dbfs,
@@ -197,6 +227,22 @@ def create_server(config: Settings) -> grpc.Server:
         _warmup_ml_models(transcription_service, text_analysis_service)
     else:
         logger.info('PRELOAD_ML_MODELS=false — models load on first use')
+
+    degradation_controller = DegradationController(
+        scheduler=ready_window_dispatcher,
+        pipeline_service=transcription_pipeline_service,
+        publish_dispatcher=publish_dispatcher,
+        base_low_priority_speech_ratio_below=config.window_low_priority_speech_ratio_below,
+        degradation_enabled=config.degradation_enabled,
+        eval_interval_ms=config.degradation_eval_interval_ms,
+        l1_queue_age_ms=config.degradation_l1_queue_age_ms,
+        l2_queue_age_ms=config.degradation_l2_queue_age_ms,
+        l3_queue_age_ms=config.degradation_l3_queue_age_ms,
+        hysteresis_factor=config.degradation_hysteresis_factor,
+        publish_queue_l2_ratio=config.degradation_publish_queue_l2_ratio,
+        publish_queue_l3_ratio=config.degradation_publish_queue_l3_ratio,
+    )
+    degradation_controller.start()
 
     return server
 

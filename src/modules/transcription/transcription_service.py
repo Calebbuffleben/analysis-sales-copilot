@@ -5,24 +5,22 @@ what happens to the transcript; that is the responsibility of
 TranscriptionPipelineService.
 
 STT provider: faster-whisper (>= 1.0.0), which depends on ctranslate2.
-System dependencies expected to be available in the runtime image:
-- build-essential        (to build ctranslate2)
-- ffmpeg                 (audio processing binary)
-- libffi-dev
-- libssl-dev
-- pkg-config
-- libsndfile1            (for soundfile support)
+
+Concurrency:
+- **In-process (default, STT_PROCESS_WORKERS=0)**: one WhisperModel guarded by a
+  threading lock (faster-whisper is not safe for concurrent transcribe calls).
+- **Process pool (STT_PROCESS_WORKERS>=1)**: one WhisperModel per worker process;
+  parallel transcribes scale with worker count (Phase 5).
 """
 
 from __future__ import annotations
 
 import logging
-import math
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from typing import Any, Optional
 
-from ..audio_buffer.audio_diagnostics import compute_pcm_window_stats
+from .transcription_core import TranscriptionSttConfig, transcribe_pcm_window
 from .types import TranscriptionResult
 
 logger = logging.getLogger(__name__)
@@ -40,6 +38,7 @@ class TranscriptionService:
         empty_diagnostic_no_vad: bool = False,
         low_energy_dbfs_threshold: float = -50.0,
         default_language: Optional[str] = None,
+        process_workers: int = 0,
     ) -> None:
         self._model_size = model_size
         self._device = device
@@ -48,8 +47,9 @@ class TranscriptionService:
         self._empty_diagnostic_no_vad = empty_diagnostic_no_vad
         self._low_energy_dbfs_threshold = low_energy_dbfs_threshold
         self._default_language = self._normalize_language(default_language)
+        self._process_workers = max(0, int(process_workers))
+
         self._model: Optional[Any] = None
-        # faster-whisper / CTranslate2 model is not safe for concurrent transcribe
         self._model_lock = threading.Lock()
         self._diagnostic_executor: Optional[ThreadPoolExecutor] = None
         if empty_diagnostic_no_vad:
@@ -58,254 +58,57 @@ class TranscriptionService:
                 thread_name_prefix='stt-no-vad-diag',
             )
 
-    def transcribe(self, window_pcm: bytes, meta: dict) -> TranscriptionResult:
-        """Transcribe a single PCM audio window.
-
-        Args:
-            window_pcm: Raw PCM bytes for the current window.
-            meta: Context (e.g. sample_rate, channels, meeting_id, participant_id).
-
-        Returns:
-            A `TranscriptionResult` with text and confidence.
-        """
-        with self._model_lock:
-            return self._transcribe_inner(window_pcm, meta)
-
-    def _transcribe_inner(self, window_pcm: bytes, meta: dict) -> TranscriptionResult:
-        sample_rate = int(meta.get('sample_rate', 0) or 0)
-        channels = max(int(meta.get('channels', 1)), 1)
-
-        if not window_pcm:
-            logger.info(
-                '📝 STT skip | reason=no_pcm | meetingId=%s | participantId=%s',
-                meta.get('meeting_id'),
-                meta.get('participant_id'),
-            )
-            return TranscriptionResult(
-                text='',
-                confidence=0.0,
-                segment_count=0,
-                vad_filter_used=self._vad_filter,
-                empty_reason='no_pcm',
-            )
-
-        stats = compute_pcm_window_stats(
-            window_pcm,
-            sample_rate=sample_rate,
-            channels=channels,
-        )
-
-        # Skip Whisper entirely for clearly inaudible windows (saves seconds per window
-        # and avoids loading the model on silence-only paths).
-        mean_rms = stats.get('mean_rms_dbfs')
-        if mean_rms is not None and mean_rms < self._low_energy_dbfs_threshold:
-            logger.info(
-                '📝 STT skip | reason=low_energy_precheck | meetingId=%s | '
-                'participantId=%s | mean_rms_dbfs=%s | threshold=%s',
-                meta.get('meeting_id'),
-                meta.get('participant_id'),
-                mean_rms,
-                self._low_energy_dbfs_threshold,
-            )
-            return TranscriptionResult(
-                text='',
-                confidence=0.0,
-                language=None,
-                segment_count=0,
-                vad_filter_used=self._vad_filter,
-                empty_reason='low_energy',
-            )
-
-        np = self._import_numpy()
-        audio = np.frombuffer(window_pcm, dtype=np.int16).astype(np.float32) / 32768.0
-
-        model = self._get_model()
-        language = self._normalize_language(
-            meta.get('language') or self._default_language,
-        )
-        fallback_language = self._normalize_language(
-            meta.get('fallback_language') or self._default_language,
-        )
-
-        segment_list, transcript_text, confidence, detected_language = self._run_transcribe(
-            model=model,
-            audio=audio,
-            language=language,
+        self._stt_config = TranscriptionSttConfig(
             vad_filter=self._vad_filter,
+            low_energy_dbfs_threshold=self._low_energy_dbfs_threshold,
+            default_language=self._default_language,
+            empty_diagnostic_no_vad=self._empty_diagnostic_no_vad,
         )
 
-        diagnostic_no_vad_chars = 0
-        empty_reason: Optional[str] = None
-        used_fallback_language: Optional[str] = None
-
-        if not transcript_text:
-            empty_reason = self._classify_empty_transcript(
-                stats=stats,
-                segment_count=len(segment_list),
+        self._process_pool: Optional[ProcessPoolExecutor] = None
+        if self._process_workers > 0:
+            from .transcription_process_pool import (
+                pool_init_worker,
+                pool_transcribe_job,
             )
-            if (
-                self._diagnostic_executor is not None
-                and self._empty_diagnostic_no_vad
-                and self._vad_filter
-                and len(segment_list) == 0
-            ):
-                # Off hot path: second pass runs in a thread; does not block next window.
-                self._diagnostic_executor.submit(
-                    self._run_diagnostic_no_vad_only,
-                    bytes(window_pcm),
-                    dict(meta),
-                )
 
-            if (
-                not transcript_text
-                and fallback_language
-                and fallback_language != language
-            ):
-                (
-                    fb_list,
-                    fb_text,
-                    fb_confidence,
-                    fb_detected_language,
-                ) = self._run_transcribe(
-                    model=model,
-                    audio=audio,
-                    language=fallback_language,
-                    vad_filter=self._vad_filter,
-                )
-                if fb_text:
-                    segment_list = fb_list
-                    transcript_text = fb_text
-                    confidence = fb_confidence
-                    detected_language = fb_detected_language or fallback_language
-                    empty_reason = None
-                    used_fallback_language = fallback_language
-                    logger.info(
-                        '📝 STT recovered with language fallback | meetingId=%s | '
-                        'participantId=%s | fallback_language=%s | chars=%s | segments=%s',
-                        meta.get('meeting_id'),
-                        meta.get('participant_id'),
-                        fallback_language,
-                        len(transcript_text),
-                        len(segment_list),
-                    )
-                else:
-                    logger.info(
-                        '📝 STT fallback language also empty | meetingId=%s | '
-                        'participantId=%s | fallback_language=%s',
-                        meta.get('meeting_id'),
-                        meta.get('participant_id'),
-                        fallback_language,
-                    )
-
-            if not transcript_text:
-                logger.info(
-                    '📝 STT empty | reason=%s | meetingId=%s | participantId=%s | '
-                    'vad_filter=%s | segments=%s | duration_s=%.3f | pcm_bytes=%s | '
-                    'mean_rms_dbfs=%s | speech_ratio=%.4f | peak_abs=%s | '
-                    'diag_no_vad_chars=%s | fallback_language=%s',
-                    empty_reason,
-                    meta.get('meeting_id'),
-                    meta.get('participant_id'),
+            self._process_pool = ProcessPoolExecutor(
+                max_workers=self._process_workers,
+                initializer=pool_init_worker,
+                initargs=(
+                    self._model_size,
+                    self._device,
+                    self._compute_type,
                     self._vad_filter,
-                    len(segment_list),
-                    float(stats.get('duration_seconds') or 0.0),
-                    stats.get('bytes_len'),
-                    stats.get('mean_rms_dbfs'),
-                    self._speech_ratio(stats),
-                    stats.get('peak_abs'),
-                    diagnostic_no_vad_chars,
-                    fallback_language,
-                )
-
-        if transcript_text:
+                    self._low_energy_dbfs_threshold,
+                    self._default_language,
+                    self._empty_diagnostic_no_vad,
+                ),
+            )
+            self._pool_transcribe_job = pool_transcribe_job
             logger.info(
-                '📝 Transcription completed | meetingId=%s | participantId=%s | '
-                'chars=%s | confidence=%.3f | vad_filter=%s | segments=%s | '
-                'duration_s=%.3f | mean_rms_dbfs=%s | detected_language=%s | '
-                'used_fallback_language=%s',
-                meta.get('meeting_id'),
-                meta.get('participant_id'),
-                len(transcript_text),
-                confidence,
-                self._vad_filter,
-                len(segment_list),
-                float(stats.get('duration_seconds') or 0.0),
-                stats.get('mean_rms_dbfs'),
-                detected_language,
-                used_fallback_language,
+                'STT process pool enabled | process_workers=%s (one Whisper per process)',
+                self._process_workers,
             )
 
-        return TranscriptionResult(
-            text=transcript_text,
-            confidence=confidence,
-            language=detected_language,
-            used_fallback_language=used_fallback_language,
-            segment_count=len(segment_list),
-            vad_filter_used=self._vad_filter,
-            empty_reason=empty_reason,
-            diagnostic_no_vad_chars=diagnostic_no_vad_chars,
-        )
+    def transcribe(self, window_pcm: bytes, meta: dict) -> TranscriptionResult:
+        """Transcribe a single PCM audio window."""
+        if self._process_pool is not None:
+            future = self._process_pool.submit(
+                self._pool_transcribe_job,
+                (window_pcm, meta),
+            )
+            return future.result()
 
-    def _run_diagnostic_no_vad_only(self, window_pcm: bytes, meta: dict) -> None:
-        """Second STT pass without VAD for logging only (does not affect published text)."""
         with self._model_lock:
-            try:
-                np = self._import_numpy()
-                audio = np.frombuffer(window_pcm, dtype=np.int16).astype(np.float32) / 32768.0
-                model = self._get_model()
-                language = self._normalize_language(
-                    meta.get('language') or self._default_language,
-                )
-                _nv_list, nv_text, _c, _l = self._run_transcribe(
-                    model=model,
-                    audio=audio,
-                    language=language,
-                    vad_filter=False,
-                )
-                if nv_text:
-                    logger.info(
-                        '📝 STT diagnostic | no-VAD rerun produced text | '
-                        'chars=%s | meetingId=%s | suggests=VAD_or_filtering',
-                        len(nv_text),
-                        meta.get('meeting_id'),
-                    )
-                else:
-                    logger.info(
-                        '📝 STT diagnostic | no-VAD rerun also empty | meetingId=%s',
-                        meta.get('meeting_id'),
-                    )
-            except Exception:
-                logger.exception(
-                    '📝 STT diagnostic | no-VAD rerun failed | meetingId=%s',
-                    meta.get('meeting_id'),
-                )
-
-    def _speech_ratio(self, stats: dict) -> float:
-        samples = int(stats.get('samples_count') or 0)
-        if samples <= 0:
-            return 0.0
-        return float(stats.get('speech_count') or 0) / float(samples)
-
-    def _classify_empty_transcript(
-        self,
-        *,
-        stats: dict,
-        segment_count: int,
-    ) -> str:
-        """Best-effort label for why STT returned no text (for logs/metrics)."""
-        duration = float(stats.get('duration_seconds') or 0.0)
-        if duration < 0.2:
-            return 'window_too_short'
-        mean_rms = stats.get('mean_rms_dbfs')
-        if mean_rms is not None and mean_rms < self._low_energy_dbfs_threshold:
-            return 'low_energy'
-        if self._speech_ratio(stats) < 0.01:
-            return 'mostly_silent'
-        if self._vad_filter and segment_count == 0:
-            return 'empty_segments_vad_on'
-        if not self._vad_filter and segment_count == 0:
-            return 'empty_segments_vad_off'
-        return 'no_text_other'
+            return transcribe_pcm_window(
+                self._get_model(),
+                window_pcm,
+                meta,
+                config=self._stt_config,
+                diagnostic_executor=self._diagnostic_executor,
+                model_lock=self._model_lock,
+            )
 
     def _get_model(self) -> Any:
         """Lazily create and cache the faster-whisper model instance."""
@@ -315,7 +118,7 @@ class TranscriptionService:
             except ImportError as error:
                 raise RuntimeError(
                     'faster-whisper is not installed. '
-                    'Install project requirements before running transcription.'
+                    'Install project requirements before running transcription.',
                 ) from error
 
             self._model = WhisperModel(
@@ -327,7 +130,24 @@ class TranscriptionService:
         return self._model
 
     def preload_model(self) -> None:
-        """Load the Whisper model into memory (call once at process startup)."""
+        """Load Whisper into memory before the first real window."""
+        if self._process_pool is not None:
+            from .transcription_process_pool import pool_warmup
+
+            # Force each worker process to start so initializers run (model load).
+            futures = [
+                self._process_pool.submit(pool_warmup, i)
+                for i in range(self._process_workers)
+            ]
+            for f in futures:
+                f.result()
+            logger.info(
+                'Whisper process pool warmed | process_workers=%s | model_size=%s',
+                self._process_workers,
+                self._model_size,
+            )
+            return
+
         with self._model_lock:
             self._get_model()
         logger.info(
@@ -337,59 +157,18 @@ class TranscriptionService:
             self._compute_type,
         )
 
-    def _import_numpy(self) -> Any:
-        """Import numpy lazily to avoid hard runtime dependency during module import."""
-        try:
-            import numpy as np
-        except ImportError as error:
-            raise RuntimeError(
-                'numpy is required for transcription audio preprocessing.'
-            ) from error
-        return np
+    def shutdown(self) -> None:
+        """Release process pool (best-effort on server stop)."""
+        if self._process_pool is not None:
+            self._process_pool.shutdown(wait=True, cancel_futures=False)
+            self._process_pool = None
+        if self._diagnostic_executor is not None:
+            self._diagnostic_executor.shutdown(wait=False)
+            self._diagnostic_executor = None
 
-    def _calculate_confidence(self, segments: list[Any]) -> float:
-        """Estimate a confidence score from faster-whisper segments."""
-        if not segments:
-            return 0.0
-
-        probabilities = []
-        for segment in segments:
-            avg_logprob = getattr(segment, 'avg_logprob', None)
-            if avg_logprob is None:
-                continue
-            probabilities.append(max(0.0, min(1.0, math.exp(avg_logprob))))
-
-        if not probabilities:
-            return 0.0
-
-        return sum(probabilities) / len(probabilities)
-
-    def _normalize_language(self, language: Optional[object]) -> Optional[str]:
+    @staticmethod
+    def _normalize_language(language: Optional[object]) -> Optional[str]:
         if language is None:
             return None
         value = str(language).strip().lower()
         return value or None
-
-    def _run_transcribe(
-        self,
-        *,
-        model: Any,
-        audio: Any,
-        language: Optional[str],
-        vad_filter: bool,
-    ) -> tuple[list[Any], str, float, Optional[str]]:
-        segments, info = model.transcribe(
-            audio=audio,
-            language=language or None,
-            beam_size=1,
-            vad_filter=vad_filter,
-        )
-        segment_list = list(segments)
-        transcript_text = ' '.join(
-            segment.text.strip()
-            for segment in segment_list
-            if getattr(segment, 'text', '').strip()
-        ).strip()
-        confidence = self._calculate_confidence(segment_list)
-        detected_language = getattr(info, 'language', None)
-        return segment_list, transcript_text, confidence, detected_language

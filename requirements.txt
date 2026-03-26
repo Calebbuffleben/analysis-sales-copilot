@@ -4,3 +4,4 @@ protobuf==4.25.3
 faster-whisper>=1.0.0
 soundfile
 sentence-transformers
+prometheus-client

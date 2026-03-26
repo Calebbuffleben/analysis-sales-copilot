@@ -76,6 +76,76 @@ class TestReadyWindowDispatcher(unittest.TestCase):
         self.assertEqual(len(received), 1)
         self.assertEqual(received[0][0], 'm:p:t')
 
+    def test_latest_wins_replaces_pending_during_inflight(self) -> None:
+        processed_window_ends: list[int] = []
+        inflight_evt = threading.Event()
+        allow_finish_evt = threading.Event()
+        second_processed_evt = threading.Event()
+
+        def process(sk: str, pcm: bytes, meta: dict) -> None:
+            processed_window_ends.append(int(meta['window_end_ms']))
+            if len(processed_window_ends) == 1:
+                inflight_evt.set()
+                # Block the inflight window so the test can enqueue a newer pending window.
+                allow_finish_evt.wait(timeout=2.0)
+            elif len(processed_window_ends) == 2:
+                second_processed_evt.set()
+
+        d = ReadyWindowDispatcher(
+            process,
+            max_queue_size=4,
+            worker_threads=1,
+            max_age_ms=60_000,
+            low_priority_speech_ratio_below=0.02,
+        )
+
+        now_ms = int(time.time() * 1000)
+        window1_end = now_ms
+        window1_start = now_ms - 10_000
+
+        ok1 = d.enqueue(
+            'm:p:t',
+            b'\x01\x00',
+            {
+                'sample_rate': 16000,
+                'channels': 1,
+                'meeting_id': 'm',
+                'participant_id': 'p',
+                'track': 't',
+                'window_start_ms': window1_start,
+                'window_end_ms': window1_end,
+                'speech_ratio': 0.4,
+            },
+        )
+        self.assertTrue(ok1)
+        self.assertTrue(inflight_evt.wait(timeout=1.0))
+
+        # Enqueue a newer window for the same stream while window1 is inflight.
+        window2_end = now_ms + 5_000
+        window2_start = now_ms - 5_000
+        ok2 = d.enqueue(
+            'm:p:t',
+            b'\x02\x00',
+            {
+                'sample_rate': 16000,
+                'channels': 1,
+                'meeting_id': 'm',
+                'participant_id': 'p',
+                'track': 't',
+                'window_start_ms': window2_start,
+                'window_end_ms': window2_end,
+                'speech_ratio': 0.4,
+            },
+        )
+        self.assertTrue(ok2)
+
+        # Allow inflight window1 to finish; scheduler should then process only window2.
+        allow_finish_evt.set()
+        self.assertTrue(second_processed_evt.wait(timeout=2.0))
+
+        self.assertEqual(processed_window_ends[0], window1_end)
+        self.assertEqual(processed_window_ends[1], window2_end)
+
 
 if __name__ == '__main__':
     unittest.main()

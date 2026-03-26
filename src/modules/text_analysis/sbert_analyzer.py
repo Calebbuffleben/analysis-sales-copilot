@@ -134,9 +134,11 @@ class SBertAnalyzer:
     def classify_categories(
         self,
         text: str,
+        *,
+        use_embeddings: bool = True,
     ) -> Tuple[Optional[str], float, Dict[str, float], float, float, Dict[str, bool]]:
         """Classify text into a sales-related semantic category."""
-        scores = self._score_categories(text)
+        scores = self._score_categories(text, use_embeddings=use_embeddings)
         if not scores:
             return None, 0.0, {}, 0.0, 0.0, {}
 
@@ -154,7 +156,10 @@ class SBertAnalyzer:
 
         return best_category, confidence, scores, ambiguity, intensity, flags
 
-    def _score_categories(self, text: str) -> Dict[str, float]:
+    def _score_categories(self, text: str, *, use_embeddings: bool) -> Dict[str, float]:
+        if not use_embeddings:
+            return self._score_categories_heuristically(text)
+
         if self.load_sbert_model() is None:
             return self._score_categories_heuristically(text)
 
