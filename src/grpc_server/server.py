@@ -221,6 +221,15 @@ def create_server(config: Settings) -> grpc.Server:
         config.window_max_age_ms,
         config.window_low_priority_speech_ratio_below,
     )
+    logger.info(
+        'Backend feedback publish | GRPC_FEEDBACK_ENABLED=%s | GRPC_FEEDBACK_URL=%s | '
+        'PUBLISH_QUEUE_MAX_SIZE=%s | PUBLISH_WORKER_THREADS=%s | PUBLISH_MAX_AGE_MS=%s',
+        config.grpc_feedback_enabled,
+        config.grpc_feedback_url,
+        config.publish_queue_max_size,
+        config.publish_worker_threads,
+        config.publish_max_age_ms,
+    )
 
     if config.preload_ml_models:
         logger.info('PRELOAD_ML_MODELS=true — loading Whisper + embedding model...')

@@ -97,6 +97,15 @@ class PublishDispatcher:
         event_age_ms = now_ms - int(event.window_end_ms or 0)
         if event_age_ms > self._max_event_age_ms:
             PUBLISH_DROPPED_TOTAL.inc()
+            logger.warning(
+                'publish drop (stale at enqueue) | meetingId=%s | participantId=%s | '
+                'window_end_ms=%s | event_age_ms=%s | max_event_age_ms=%s',
+                event.meeting_id,
+                event.participant_id,
+                event.window_end_ms,
+                event_age_ms,
+                self._max_event_age_ms,
+            )
             return False
 
         item = _PublishItem(
@@ -110,6 +119,15 @@ class PublishDispatcher:
                 return False
             if len(self._queue) >= self._max_queue_size:
                 PUBLISH_DROPPED_TOTAL.inc()
+                logger.warning(
+                    'publish drop (queue full) | meetingId=%s | participantId=%s | '
+                    'window_end_ms=%s | queue_len=%s | max=%s',
+                    event.meeting_id,
+                    event.participant_id,
+                    event.window_end_ms,
+                    len(self._queue),
+                    self._max_queue_size,
+                )
                 return False
 
             self._queue.append(item)
@@ -149,6 +167,15 @@ class PublishDispatcher:
         event_age_ms = now_ms - int(item.event.window_end_ms or 0)
         if event_age_ms > self._max_event_age_ms:
             PUBLISH_DROPPED_TOTAL.inc()
+            logger.warning(
+                'publish drop (stale at worker) | meetingId=%s | participantId=%s | '
+                'window_end_ms=%s | event_age_ms=%s | max_event_age_ms=%s',
+                item.event.meeting_id,
+                item.event.participant_id,
+                item.event.window_end_ms,
+                event_age_ms,
+                self._max_event_age_ms,
+            )
             return
 
         t0 = time.perf_counter()

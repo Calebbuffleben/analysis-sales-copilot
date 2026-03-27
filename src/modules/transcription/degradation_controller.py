@@ -181,9 +181,12 @@ class DegradationController:
                 low_priority_speech_ratio_below=self._base_low_priority_speech_ratio_below * 1.0,
             )
         if level == 'L1':
+            # Under any backlog (>= L1 threshold), skip SBERT embeddings — they were
+            # dominating latency (~seconds per window) while L1 still had
+            # use_embeddings=True, starving the pipeline and delaying publish.
             return ExecutionProfile(
                 level='L1',
-                use_embeddings=True,
+                use_embeddings=False,
                 compute_category_transition=False,
                 low_priority_speech_ratio_below=self._base_low_priority_speech_ratio_below * 1.5,
             )

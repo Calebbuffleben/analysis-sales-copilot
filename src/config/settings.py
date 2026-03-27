@@ -36,7 +36,9 @@ class Settings:
     # Publish dispatcher (decouple STT/analysis from backend gRPC I/O)
     publish_queue_max_size: int = 64
     publish_worker_threads: int = 2
-    publish_max_age_ms: int = 10_000
+    # Max wall time after window_end_ms before dropping publish. Must exceed worst-case
+    # (queue + STT + analysis); 10s was too tight on CPU and dropped all gRPC publishes.
+    publish_max_age_ms: int = 60_000
     publish_retry_limit: int = 1
     publish_retry_backoff_ms: int = 200
     metrics_enabled: bool = True
@@ -52,7 +54,8 @@ class Settings:
     degradation_l1_queue_age_ms: int = 1000
     degradation_l2_queue_age_ms: int = 2500
     degradation_l3_queue_age_ms: int = 5000
-    degradation_hysteresis_factor: float = 0.7
+    # Lower = harder to upgrade back to L0 (less L0<->L1 flapping when queue breathes).
+    degradation_hysteresis_factor: float = 0.55
     degradation_publish_queue_l2_ratio: float = 0.8
     degradation_publish_queue_l3_ratio: float = 0.95
 
@@ -119,7 +122,7 @@ class Settings:
             publish_worker_threads=int(
                 os.getenv('PUBLISH_WORKER_THREADS', '2'),
             ),
-            publish_max_age_ms=int(os.getenv('PUBLISH_MAX_AGE_MS', '10000')),
+            publish_max_age_ms=int(os.getenv('PUBLISH_MAX_AGE_MS', '60000')),
             publish_retry_limit=int(os.getenv('PUBLISH_RETRY_LIMIT', '1')),
             publish_retry_backoff_ms=int(
                 os.getenv('PUBLISH_RETRY_BACKOFF_MS', '200'),
@@ -143,7 +146,7 @@ class Settings:
                 os.getenv('DEGRADATION_L3_QUEUE_AGE_MS', '5000'),
             ),
             degradation_hysteresis_factor=float(
-                os.getenv('DEGRADATION_HYSTERESIS_FACTOR', '0.7'),
+                os.getenv('DEGRADATION_HYSTERESIS_FACTOR', '0.55'),
             ),
             degradation_publish_queue_l2_ratio=float(
                 os.getenv('DEGRADATION_PUBLISH_QUEUE_L2_RATIO', '0.8'),
