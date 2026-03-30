@@ -5,12 +5,14 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from importlib import import_module
 from typing import Any, Optional
 
 import grpc
 
 from .types import BackendFeedbackEvent
+from ...metrics.realtime_metrics import FEEDBACK_PUBLISH_ERRORS_TOTAL
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +37,7 @@ class BackendFeedbackClient:
         if self._enabled:
             self._initialize_stub()
 
-    def publish_feedback(self, event: BackendFeedbackEvent) -> None:
+    def publish_feedback(self, event: BackendFeedbackEvent) -> float | None:
         """Publish one canonical feedback event to the backend."""
         if self._enabled and self._stub is None:
             self._initialize_stub()
@@ -95,11 +97,14 @@ class BackendFeedbackClient:
             )
 
         try:
+            t0 = time.perf_counter()
             self._stub.PublishFeedback(
                 request,
                 timeout=self._timeout_seconds,
             )
+            t1 = time.perf_counter()
         except grpc.RpcError as exc:
+            FEEDBACK_PUBLISH_ERRORS_TOTAL.inc()
             logger.error(
                 '📨 Feedback publish failed (gRPC) | meetingId=%s | participantId=%s | '
                 'type=%s | code=%s | details=%s',
@@ -111,6 +116,7 @@ class BackendFeedbackClient:
             )
             raise
         except Exception as exc:
+            FEEDBACK_PUBLISH_ERRORS_TOTAL.inc()
             logger.error(
                 '📨 Feedback publish failed | meetingId=%s | participantId=%s | type=%s | %s',
                 event.meeting_id,
@@ -132,6 +138,9 @@ class BackendFeedbackClient:
             event.window_start_ms,
             event.window_end_ms,
         )
+
+        publish_grpc_ms = (t1 - t0) * 1000.0
+        return publish_grpc_ms
 
     def _initialize_stub(self) -> None:
         """Create the gRPC stub lazily after proto modules are available."""

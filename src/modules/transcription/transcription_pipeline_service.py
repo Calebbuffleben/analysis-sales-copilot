@@ -4,13 +4,23 @@ from __future__ import annotations
 
 import logging
 import time
+import threading
 from typing import Optional
 
 from ..audio_buffer.audio_diagnostics import compute_pcm_window_stats
-from ..backend_feedback.grpc_feedback_client import BackendFeedbackClient
+from ..backend_feedback.publish_dispatcher import PublishDispatcher
 from ..backend_feedback.types import BackendFeedbackEvent
 from ..text_analysis.text_analysis_service import TextAnalysisService
 from ..text_analysis.types import TextAnalysisResult, TranscriptionChunk
+from .execution_profile import ExecutionProfile
+from ...metrics.realtime_metrics import (
+    ANALYSIS_MS,
+    PIPELINE_TOTAL_MS,
+    STT_MS,
+    WINDOW_END_TO_PIPELINE_START_MS,
+    WINDOW_PROCESSED_TOTAL,
+    WINDOW_SKIPPED_EMPTY_TOTAL,
+)
 from .transcription_service import TranscriptionService
 
 logger = logging.getLogger(__name__)
@@ -23,14 +33,26 @@ class TranscriptionPipelineService:
         self,
         transcription_service: TranscriptionService,
         text_analysis_service: TextAnalysisService,
-        backend_feedback_client: BackendFeedbackClient,
+        publish_dispatcher: PublishDispatcher,
         default_language: Optional[str] = None,
     ) -> None:
         self._transcription_service = transcription_service
         self._text_analysis_service = text_analysis_service
-        self._backend_feedback_client = backend_feedback_client
+        self._publish_dispatcher = publish_dispatcher
         self._default_language = self._normalize_language(default_language)
         self._stream_language_hints: dict[str, str] = {}
+        self._profile_lock = threading.Lock()
+        self._execution_profile = ExecutionProfile(
+            level='L0',
+            use_embeddings=True,
+            compute_category_transition=True,
+            low_priority_speech_ratio_below=0.0,
+        )
+
+    def set_execution_profile(self, profile: ExecutionProfile) -> None:
+        """Called by DegradationController to update execution flags."""
+        with self._profile_lock:
+            self._execution_profile = profile
 
     def _on_window_ready(
         self,
@@ -49,6 +71,7 @@ class TranscriptionPipelineService:
     ) -> None:
         """Process one ready window: STT, analysis, publish."""
         t_pipeline_start = time.perf_counter()
+        t_wall_pipeline_start_ms = int(time.time() * 1000)
         enriched_meta = dict(meta)
         configured_language = self._default_language
         if configured_language:
@@ -62,10 +85,31 @@ class TranscriptionPipelineService:
         if fallback_language:
             enriched_meta['fallback_language'] = fallback_language
 
+        window_end_ms = int(enriched_meta.get('window_end_ms', 0) or 0)
+        enqueued_at_ms = enriched_meta.get('enqueued_at_ms')
+        dequeued_at_ms = enriched_meta.get('dequeued_at_ms')
+        queue_wait_ms = None
+        if isinstance(enqueued_at_ms, int) and isinstance(dequeued_at_ms, int):
+            queue_wait_ms = max(0, dequeued_at_ms - enqueued_at_ms)
+
+        window_end_to_pipeline_start_ms = (
+            (t_wall_pipeline_start_ms - window_end_ms)
+            if window_end_ms
+            else None
+        )
+
+        if window_end_to_pipeline_start_ms is not None:
+            WINDOW_END_TO_PIPELINE_START_MS.observe(
+                float(window_end_to_pipeline_start_ms),
+            )
+
         t_stt_start = time.perf_counter()
         transcription = self._transcription_service.transcribe(window_pcm, enriched_meta)
         t_stt_end = time.perf_counter()
+
+        STT_MS.observe((t_stt_end - t_stt_start) * 1000.0)
         if not transcription.text.strip():
+            WINDOW_SKIPPED_EMPTY_TOTAL.inc()
             logger.info(
                 '⏭️ Pipeline skip (empty transcript) | stream_key=%s | reason=%s | '
                 'vad_filter=%s | segments=%s | language=%s | fallback_language=%s | '
@@ -104,16 +148,31 @@ class TranscriptionPipelineService:
             window_end_ms=int(enriched_meta['window_end_ms']),
         )
         t_ana_start = time.perf_counter()
-        analysis = self._text_analysis_service.analyze(chunk)
+        with self._profile_lock:
+            execution_profile = self._execution_profile
+        analysis = self._text_analysis_service.analyze(
+            chunk,
+            execution_profile=execution_profile,
+        )
         self._apply_audio_window_stats(analysis, window_pcm, enriched_meta)
         t_ana_end = time.perf_counter()
+        ANALYSIS_MS.observe((t_ana_end - t_ana_start) * 1000.0)
         t_pub_start = time.perf_counter()
-        self._handle_transcript(stream_key, chunk, analysis)
+        published_enqueued = self._handle_transcript(stream_key, chunk, analysis)
         t_pub_end = time.perf_counter()
+
+        if published_enqueued:
+            WINDOW_PROCESSED_TOTAL.inc()
+
+        PIPELINE_TOTAL_MS.observe((t_pub_end - t_pipeline_start) * 1000.0)
         logger.info(
-            '⏱️ Pipeline latency | stream_key=%s | stt_ms=%.1f | analysis_ms=%.1f | '
-            'publish_ms=%.1f | total_ms=%.1f',
+            '⏱️ Pipeline latency | stream_key=%s | queue_wait_ms=%s | '
+            'window_end_to_pipeline_start_ms=%s | publish_enqueued=%s | '
+            'stt_ms=%.1f | analysis_ms=%.1f | enqueue_ms=%.1f | total_ms=%.1f',
             stream_key,
+            queue_wait_ms,
+            window_end_to_pipeline_start_ms,
+            published_enqueued,
             (t_stt_end - t_stt_start) * 1000.0,
             (t_ana_end - t_ana_start) * 1000.0,
             (t_pub_end - t_pub_start) * 1000.0,
@@ -125,17 +184,18 @@ class TranscriptionPipelineService:
         stream_key: str,
         transcript: TranscriptionChunk,
         analysis: TextAnalysisResult,
-    ) -> None:
-        """Publish a raw text-analysis ingress event to the backend."""
+    ) -> bool:
+        """Enqueue backend publish without blocking the STT worker path."""
         event = self._build_event(transcript, analysis)
         try:
-            self._backend_feedback_client.publish_feedback(event)
+            return self._publish_dispatcher.enqueue(event)
         except Exception as exc:
             logger.exception(
-                'Feedback publish failed after transcript | stream_key=%s | error=%s',
+                'Feedback publish enqueue failed after transcript | stream_key=%s | error=%s',
                 stream_key,
                 exc,
             )
+            return False
 
     def _build_event(
         self,

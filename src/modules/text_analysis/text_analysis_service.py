@@ -9,6 +9,7 @@ from .sbert_analyzer import SBertAnalyzer
 from .semantic_pipeline import SemanticPipeline
 from .signals.indecision_signal import IndecisionSignalDetector
 from .types import TextAnalysisResult, TranscriptionChunk
+from ..transcription.execution_profile import ExecutionProfile
 
 
 class TextAnalysisService:
@@ -36,9 +37,17 @@ class TextAnalysisService:
         """Generate a unique conversational context key."""
         return f"{chunk.meeting_id}:{chunk.participant_id}"
 
-    def analyze(self, chunk: TranscriptionChunk) -> TextAnalysisResult:
+    def analyze(
+        self,
+        chunk: TranscriptionChunk,
+        *,
+        execution_profile: ExecutionProfile,
+    ) -> TextAnalysisResult:
         """Analyze text and return a normalized analysis result."""
-        semantic_result = self.semantic_pipeline.run(chunk.text)
+        semantic_result = self.semantic_pipeline.run(
+            chunk.text,
+            use_embeddings=execution_profile.use_embeddings,
+        )
         context_key = self._get_context_key(chunk)
         history = list(self._history[context_key])
 
@@ -47,12 +56,14 @@ class TextAnalysisService:
             chunk.text,
         )
 
-        category_transition = self._detect_category_transition(
-            semantic_result.get('sales_category'),
-            semantic_result.get('sales_category_confidence') or 0.0,
-            history,
-            chunk.timestamp_ms,
-        )
+        category_transition = None
+        if execution_profile.compute_category_transition:
+            category_transition = self._detect_category_transition(
+                semantic_result.get('sales_category'),
+                semantic_result.get('sales_category_confidence') or 0.0,
+                history,
+                chunk.timestamp_ms,
+            )
 
         result = TextAnalysisResult(
             embedding=semantic_result.get('embedding', []),

@@ -25,16 +25,39 @@ class Settings:
     whisper_empty_diagnostic_no_vad: bool = False
     whisper_low_energy_dbfs: float = -50.0
     whisper_default_language: Optional[str] = None
+    # STT process parallelism (Phase 5): 0 = in-process + lock; N>=1 = N worker processes,
+    # each with its own WhisperModel (true parallel transcribe).
+    stt_process_workers: int = 0
     # Ready-window queue (bounded realtime processing)
     window_queue_max_size: int = 8
     window_worker_threads: int = 2
     window_max_age_ms: int = 25_000
     window_low_priority_speech_ratio_below: float = 0.02
+    # Publish dispatcher (decouple STT/analysis from backend gRPC I/O)
+    publish_queue_max_size: int = 64
+    publish_worker_threads: int = 2
+    # Max wall time after window_end_ms before dropping publish. Must exceed worst-case
+    # (queue + STT + analysis); 10s was too tight on CPU and dropped all gRPC publishes.
+    publish_max_age_ms: int = 60_000
+    publish_retry_limit: int = 1
+    publish_retry_backoff_ms: int = 200
+    metrics_enabled: bool = True
+    metrics_port: int = 9100
     log_level: str = 'INFO'
     proto_dir: Optional[str] = None
     # Load Whisper + sentence-transformers before accepting traffic (avoids multi-minute
     # delay on first real-time window from HF download + model init).
     preload_ml_models: bool = True
+    # Runtime degradation (control plane)
+    degradation_enabled: bool = True
+    degradation_eval_interval_ms: int = 500
+    degradation_l1_queue_age_ms: int = 1000
+    degradation_l2_queue_age_ms: int = 2500
+    degradation_l3_queue_age_ms: int = 5000
+    # Lower = harder to upgrade back to L0 (less L0<->L1 flapping when queue breathes).
+    degradation_hysteresis_factor: float = 0.55
+    degradation_publish_queue_l2_ratio: float = 0.8
+    degradation_publish_queue_l3_ratio: float = 0.95
 
     @classmethod
     def from_env(cls) -> 'Settings':
@@ -86,15 +109,51 @@ class Settings:
             whisper_default_language=cls._normalize_language(
                 os.getenv('WHISPER_DEFAULT_LANGUAGE'),
             ),
+            stt_process_workers=int(os.getenv('STT_PROCESS_WORKERS', '0')),
             window_queue_max_size=int(os.getenv('WINDOW_QUEUE_MAX_SIZE', '8')),
             window_worker_threads=int(os.getenv('WINDOW_WORKER_THREADS', '2')),
             window_max_age_ms=int(os.getenv('WINDOW_MAX_AGE_MS', '25000')),
             window_low_priority_speech_ratio_below=float(
                 os.getenv('WINDOW_LOW_PRIORITY_SPEECH_RATIO_BELOW', '0.02'),
             ),
+            publish_queue_max_size=int(
+                os.getenv('PUBLISH_QUEUE_MAX_SIZE', '64'),
+            ),
+            publish_worker_threads=int(
+                os.getenv('PUBLISH_WORKER_THREADS', '2'),
+            ),
+            publish_max_age_ms=int(os.getenv('PUBLISH_MAX_AGE_MS', '60000')),
+            publish_retry_limit=int(os.getenv('PUBLISH_RETRY_LIMIT', '1')),
+            publish_retry_backoff_ms=int(
+                os.getenv('PUBLISH_RETRY_BACKOFF_MS', '200'),
+            ),
+            metrics_enabled=os.getenv('METRICS_ENABLED', 'true').lower() == 'true',
+            metrics_port=int(os.getenv('METRICS_PORT', '9100')),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             proto_dir=os.getenv('PROTO_DIR'),
             preload_ml_models=os.getenv('PRELOAD_ML_MODELS', 'true').lower() == 'true',
+            degradation_enabled=os.getenv('DEGRADATION_ENABLED', 'true').lower() == 'true',
+            degradation_eval_interval_ms=int(
+                os.getenv('DEGRADATION_EVAL_INTERVAL_MS', '500'),
+            ),
+            degradation_l1_queue_age_ms=int(
+                os.getenv('DEGRADATION_L1_QUEUE_AGE_MS', '1000'),
+            ),
+            degradation_l2_queue_age_ms=int(
+                os.getenv('DEGRADATION_L2_QUEUE_AGE_MS', '2500'),
+            ),
+            degradation_l3_queue_age_ms=int(
+                os.getenv('DEGRADATION_L3_QUEUE_AGE_MS', '5000'),
+            ),
+            degradation_hysteresis_factor=float(
+                os.getenv('DEGRADATION_HYSTERESIS_FACTOR', '0.55'),
+            ),
+            degradation_publish_queue_l2_ratio=float(
+                os.getenv('DEGRADATION_PUBLISH_QUEUE_L2_RATIO', '0.8'),
+            ),
+            degradation_publish_queue_l3_ratio=float(
+                os.getenv('DEGRADATION_PUBLISH_QUEUE_L3_RATIO', '0.95'),
+            ),
         )
 
     @staticmethod
@@ -145,6 +204,10 @@ class Settings:
             raise ValueError(
                 f'Invalid WHISPER_LOW_ENERGY_DBFS: {self.whisper_low_energy_dbfs}',
             )
+        if self.stt_process_workers < 0:
+            raise ValueError(
+                f'Invalid STT_PROCESS_WORKERS: {self.stt_process_workers}',
+            )
         if self.window_queue_max_size < 1:
             raise ValueError(
                 f'Invalid WINDOW_QUEUE_MAX_SIZE: {self.window_queue_max_size}',
@@ -161,6 +224,64 @@ class Settings:
             raise ValueError(
                 'Invalid WINDOW_LOW_PRIORITY_SPEECH_RATIO_BELOW: '
                 f'{self.window_low_priority_speech_ratio_below}',
+            )
+        if self.publish_queue_max_size < 1:
+            raise ValueError(
+                f'Invalid PUBLISH_QUEUE_MAX_SIZE: {self.publish_queue_max_size}',
+            )
+        if self.publish_worker_threads < 1:
+            raise ValueError(
+                f'Invalid PUBLISH_WORKER_THREADS: {self.publish_worker_threads}',
+            )
+        if self.publish_max_age_ms < 100:
+            raise ValueError(
+                f'Invalid PUBLISH_MAX_AGE_MS: {self.publish_max_age_ms}',
+            )
+        if self.publish_retry_limit < 0:
+            raise ValueError(
+                f'Invalid PUBLISH_RETRY_LIMIT: {self.publish_retry_limit}',
+            )
+        if self.publish_retry_backoff_ms < 0:
+            raise ValueError(
+                f'Invalid PUBLISH_RETRY_BACKOFF_MS: {self.publish_retry_backoff_ms}',
+            )
+        if self.metrics_port < 1 or self.metrics_port > 65535:
+            raise ValueError(f'Invalid METRICS_PORT: {self.metrics_port}')
+
+        if self.degradation_eval_interval_ms < 50:
+            raise ValueError(
+                'Invalid DEGRADATION_EVAL_INTERVAL_MS: '
+                f'{self.degradation_eval_interval_ms}',
+            )
+        if not 0.0 < self.degradation_hysteresis_factor <= 1.0:
+            raise ValueError(
+                'Invalid DEGRADATION_HYSTERESIS_FACTOR: '
+                f'{self.degradation_hysteresis_factor}',
+            )
+        if not 0.0 <= self.degradation_l1_queue_age_ms < self.degradation_l2_queue_age_ms:
+            raise ValueError(
+                'Invalid degradation queue age thresholds: '
+                f'L1={self.degradation_l1_queue_age_ms} L2={self.degradation_l2_queue_age_ms}',
+            )
+        if not 0.0 <= self.degradation_l2_queue_age_ms < self.degradation_l3_queue_age_ms:
+            raise ValueError(
+                'Invalid degradation queue age thresholds: '
+                f'L2={self.degradation_l2_queue_age_ms} L3={self.degradation_l3_queue_age_ms}',
+            )
+        if not 0.0 < self.degradation_publish_queue_l2_ratio <= 1.0:
+            raise ValueError(
+                'Invalid DEGRADATION_PUBLISH_QUEUE_L2_RATIO: '
+                f'{self.degradation_publish_queue_l2_ratio}',
+            )
+        if not 0.0 < self.degradation_publish_queue_l3_ratio <= 1.0:
+            raise ValueError(
+                'Invalid DEGRADATION_PUBLISH_QUEUE_L3_RATIO: '
+                f'{self.degradation_publish_queue_l3_ratio}',
+            )
+        if self.degradation_publish_queue_l3_ratio < self.degradation_publish_queue_l2_ratio:
+            raise ValueError(
+                'Invalid degradation publish ratios: '
+                f'L2={self.degradation_publish_queue_l2_ratio} L3={self.degradation_publish_queue_l3_ratio}',
             )
 
 
