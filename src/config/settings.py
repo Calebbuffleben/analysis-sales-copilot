@@ -52,12 +52,12 @@ class Settings:
     degradation_enabled: bool = True
     degradation_eval_interval_ms: int = 500
     degradation_l1_queue_age_ms: int = 1000
-    degradation_l2_queue_age_ms: int = 2500
-    degradation_l3_queue_age_ms: int = 5000
+    degradation_l2_queue_age_ms: int = 4000
+    degradation_l3_queue_age_ms: int = 8000
     # Lower = harder to upgrade back to L0 (less L0<->L1 flapping when queue breathes).
     degradation_hysteresis_factor: float = 0.55
-    degradation_recovery_consecutive_evals: int = 3
-    degradation_min_level_hold_ms: int = 2000
+    degradation_recovery_consecutive_evals: int = 4
+    degradation_min_level_hold_ms: int = 3000
     degradation_publish_queue_l2_ratio: float = 0.8
     degradation_publish_queue_l3_ratio: float = 0.95
 
@@ -142,19 +142,19 @@ class Settings:
                 os.getenv('DEGRADATION_L1_QUEUE_AGE_MS', '1000'),
             ),
             degradation_l2_queue_age_ms=int(
-                os.getenv('DEGRADATION_L2_QUEUE_AGE_MS', '2500'),
+                os.getenv('DEGRADATION_L2_QUEUE_AGE_MS', '4000'),
             ),
             degradation_l3_queue_age_ms=int(
-                os.getenv('DEGRADATION_L3_QUEUE_AGE_MS', '5000'),
+                os.getenv('DEGRADATION_L3_QUEUE_AGE_MS', '8000'),
             ),
             degradation_hysteresis_factor=float(
                 os.getenv('DEGRADATION_HYSTERESIS_FACTOR', '0.55'),
             ),
             degradation_recovery_consecutive_evals=int(
-                os.getenv('DEGRADATION_RECOVERY_CONSECUTIVE_EVALS', '3'),
+                os.getenv('DEGRADATION_RECOVERY_CONSECUTIVE_EVALS', '4'),
             ),
             degradation_min_level_hold_ms=int(
-                os.getenv('DEGRADATION_MIN_LEVEL_HOLD_MS', '2000'),
+                os.getenv('DEGRADATION_MIN_LEVEL_HOLD_MS', '3000'),
             ),
             degradation_publish_queue_l2_ratio=float(
                 os.getenv('DEGRADATION_PUBLISH_QUEUE_L2_RATIO', '0.8'),

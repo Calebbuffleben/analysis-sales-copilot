@@ -58,7 +58,8 @@ class TestTranscriptionPipelineService(unittest.TestCase):
         self.assertEqual(event.feedback_type, 'audio_metrics_ingress')
         self.assertEqual(event.analysis.analysis_mode, 'audio_only')
         self.assertTrue(event.analysis.signal_validity['audio_aggregate'])
-        self.assertFalse(event.analysis.signal_validity['semantic_indecision'])
+        self.assertFalse(event.analysis.signal_validity['indecision_fast'])
+        self.assertFalse(event.analysis.signal_validity['indecision_semantic'])
 
 
 if __name__ == '__main__':

@@ -30,11 +30,12 @@ class TestTextAnalysisPrecisionFirst(unittest.TestCase):
             low_priority_speech_ratio_below=0.03,
             analysis_mode='semantic_suppressed',
             signal_validity={
-                'semantic_indecision': False,
-                'audio_aggregate': False,
+                'indecision_fast': True,
+                'indecision_semantic': False,
+                'audio_aggregate': True,
             },
             suppression_reasons=[
-                'semantic_feedback_suppressed_by_degradation',
+                'indecision_semantic_suppressed_by_degradation',
             ],
         )
 
@@ -44,9 +45,10 @@ class TestTextAnalysisPrecisionFirst(unittest.TestCase):
         self.assertEqual(out.category_flags, {})
         self.assertEqual(out.analysis_mode, 'semantic_suppressed')
         self.assertEqual(out.degradation_level, 'L2')
-        self.assertEqual(out.signal_validity['semantic_indecision'], False)
+        self.assertEqual(out.signal_validity['indecision_fast'], True)
+        self.assertEqual(out.signal_validity['indecision_semantic'], False)
         self.assertIn(
-            'semantic_feedback_suppressed_by_degradation',
+            'indecision_semantic_suppressed_by_degradation',
             out.suppression_reasons,
         )
 

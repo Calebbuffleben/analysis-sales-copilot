@@ -104,20 +104,22 @@ class DegradationController:
         publish_q = self._publish_dispatcher.get_queue_size()
         publish_max = self._publish_dispatcher.get_max_queue_size()
 
-        # If publish_q is high relative to its own capacity, we increase degradation
+        # Publish backlog affects freshness, but should not by itself suppress the
+        # indecision detector's semantic meaning. Cap its influence below the level
+        # that disables indecision semantics.
         publish_level = 'L0'
         if publish_max > 0:
             ratio = publish_q / publish_max
             if ratio >= self._publish_queue_l3_ratio:
-                publish_level = 'L3'
+                publish_level = 'L1'
             elif ratio >= self._publish_queue_l2_ratio:
-                publish_level = 'L2'
+                publish_level = 'L1'
 
         # queue-age based desired level
         desired_by_age = 'L0'
-        if oldest_pending_age_ms >= self._l3_queue_age_ms:
+        if oldest_pending_age_ms >= self._l3_queue_age_ms and pending_size >= 3:
             desired_by_age = 'L3'
-        elif oldest_pending_age_ms >= self._l2_queue_age_ms:
+        elif oldest_pending_age_ms >= self._l2_queue_age_ms and pending_size >= 2:
             desired_by_age = 'L2'
         elif oldest_pending_age_ms >= self._l1_queue_age_ms:
             desired_by_age = 'L1'
@@ -219,7 +221,8 @@ class DegradationController:
                 low_priority_speech_ratio_below=self._base_low_priority_speech_ratio_below * 1.0,
                 analysis_mode='full_semantic',
                 signal_validity={
-                    'semantic_indecision': True,
+                    'indecision_fast': True,
+                    'indecision_semantic': True,
                     'audio_aggregate': True,
                 },
             )
@@ -235,7 +238,8 @@ class DegradationController:
                 low_priority_speech_ratio_below=self._base_low_priority_speech_ratio_below * 1.0,
                 analysis_mode='full_semantic',
                 signal_validity={
-                    'semantic_indecision': True,
+                    'indecision_fast': True,
+                    'indecision_semantic': True,
                     'audio_aggregate': True,
                 },
             )
@@ -248,11 +252,12 @@ class DegradationController:
                 low_priority_speech_ratio_below=self._base_low_priority_speech_ratio_below * 1.5,
                 analysis_mode='semantic_suppressed',
                 signal_validity={
-                    'semantic_indecision': False,
+                    'indecision_fast': True,
+                    'indecision_semantic': False,
                     'audio_aggregate': True,
                 },
                 suppression_reasons=[
-                    'semantic_feedback_suppressed_by_degradation',
+                    'indecision_semantic_suppressed_by_degradation',
                 ],
             )
         # L3
@@ -264,11 +269,13 @@ class DegradationController:
             low_priority_speech_ratio_below=self._base_low_priority_speech_ratio_below * 4.0,
             analysis_mode='semantic_suppressed',
             signal_validity={
-                'semantic_indecision': False,
+                'indecision_fast': False,
+                'indecision_semantic': False,
                 'audio_aggregate': True,
             },
             suppression_reasons=[
-                'semantic_feedback_suppressed_by_severe_degradation',
+                'indecision_fast_suppressed_by_severe_degradation',
+                'indecision_semantic_suppressed_by_severe_degradation',
             ],
         )
 

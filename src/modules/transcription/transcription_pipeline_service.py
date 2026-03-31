@@ -50,7 +50,8 @@ class TranscriptionPipelineService:
             low_priority_speech_ratio_below=0.0,
             analysis_mode='full_semantic',
             signal_validity={
-                'semantic_indecision': True,
+                'indecision_fast': True,
+                'indecision_semantic': True,
                 'audio_aggregate': True,
             },
         )
@@ -210,13 +211,14 @@ class TranscriptionPipelineService:
             analysis_mode='audio_only',
             degradation_level=execution_profile.level,
             signal_validity={
-                'semantic_indecision': False,
+                'indecision_fast': False,
+                'indecision_semantic': False,
                 'audio_aggregate': execution_profile.signal_validity.get(
                     'audio_aggregate',
                     True,
                 ),
             },
-            suppression_reasons=['semantic_not_available_for_audio_only_ingress'],
+            suppression_reasons=['indecision_not_available_for_audio_only_ingress'],
         )
         event = BackendFeedbackEvent(
             meeting_id=str(meta['meeting_id']),

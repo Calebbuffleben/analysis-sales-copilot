@@ -59,10 +59,12 @@ class TestDegradationController(unittest.TestCase):
 
         controller._apply_profile(controller._make_profile('L0'))
         scheduler.oldest_pending_age_ms = 2600
+        scheduler.pending_size = 2
         controller._evaluate_and_apply()
         self.assertEqual(controller._current_level, 'L2')
 
         scheduler.oldest_pending_age_ms = 100
+        scheduler.pending_size = 0
         controller._evaluate_and_apply()
         controller._evaluate_and_apply()
         self.assertEqual(controller._current_level, 'L2')
@@ -77,7 +79,7 @@ class TestDegradationController(unittest.TestCase):
         controller._evaluate_and_apply()
         self.assertEqual(controller._current_level, 'L0')
 
-    def test_audio_aggregate_stays_valid_in_degraded_profiles(self) -> None:
+    def test_indecision_fast_path_survives_l2_but_not_l3(self) -> None:
         scheduler = _FakeScheduler()
         pipeline = _FakePipelineService()
         publish_dispatcher = _FakePublishDispatcher()
@@ -91,10 +93,29 @@ class TestDegradationController(unittest.TestCase):
         l2 = controller._make_profile('L2')
         l3 = controller._make_profile('L3')
 
-        self.assertFalse(l2.signal_validity['semantic_indecision'])
+        self.assertTrue(l2.signal_validity['indecision_fast'])
+        self.assertFalse(l2.signal_validity['indecision_semantic'])
         self.assertTrue(l2.signal_validity['audio_aggregate'])
-        self.assertFalse(l3.signal_validity['semantic_indecision'])
+        self.assertFalse(l3.signal_validity['indecision_fast'])
+        self.assertFalse(l3.signal_validity['indecision_semantic'])
         self.assertTrue(l3.signal_validity['audio_aggregate'])
+
+    def test_publish_pressure_is_capped_below_semantic_suppression(self) -> None:
+        scheduler = _FakeScheduler()
+        pipeline = _FakePipelineService()
+        publish_dispatcher = _FakePublishDispatcher()
+        publish_dispatcher.queue_size = publish_dispatcher.max_queue_size
+        controller = DegradationController(
+            scheduler=scheduler,
+            pipeline_service=pipeline,
+            publish_dispatcher=publish_dispatcher,
+            base_low_priority_speech_ratio_below=0.02,
+        )
+
+        controller._apply_profile(controller._make_profile('L0'))
+        controller._evaluate_and_apply()
+
+        self.assertEqual(controller._current_level, 'L1')
 
 
 if __name__ == '__main__':
