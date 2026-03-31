@@ -177,32 +177,64 @@ class DegradationController:
             return ExecutionProfile(
                 level='L0',
                 use_embeddings=True,
+                semantic_pipeline_enabled=True,
                 compute_category_transition=True,
                 low_priority_speech_ratio_below=self._base_low_priority_speech_ratio_below * 1.0,
+                analysis_mode='full_semantic',
+                signal_validity={
+                    'semantic_indecision': True,
+                    'audio_aggregate': True,
+                },
             )
         if level == 'L1':
-            # Under any backlog (>= L1 threshold), skip SBERT embeddings — they were
-            # dominating latency (~seconds per window) while L1 still had
-            # use_embeddings=True, starving the pipeline and delaying publish.
+            # Precision-first degradation: preserve semantic fidelity for any
+            # window we still admit. L1 may reduce freshness coverage elsewhere,
+            # but it must not change the meaning of semantic outputs.
             return ExecutionProfile(
                 level='L1',
-                use_embeddings=False,
+                use_embeddings=True,
+                semantic_pipeline_enabled=True,
                 compute_category_transition=False,
-                low_priority_speech_ratio_below=self._base_low_priority_speech_ratio_below * 1.5,
+                low_priority_speech_ratio_below=self._base_low_priority_speech_ratio_below * 1.0,
+                analysis_mode='full_semantic',
+                signal_validity={
+                    'semantic_indecision': True,
+                    'audio_aggregate': True,
+                },
             )
         if level == 'L2':
             return ExecutionProfile(
                 level='L2',
                 use_embeddings=False,
+                semantic_pipeline_enabled=False,
                 compute_category_transition=False,
-                low_priority_speech_ratio_below=self._base_low_priority_speech_ratio_below * 2.5,
+                low_priority_speech_ratio_below=self._base_low_priority_speech_ratio_below * 1.5,
+                analysis_mode='semantic_suppressed',
+                signal_validity={
+                    'semantic_indecision': False,
+                    'audio_aggregate': False,
+                },
+                suppression_reasons=[
+                    'semantic_feedback_suppressed_by_degradation',
+                    'audio_aggregate_unreliable_under_backpressure',
+                ],
             )
         # L3
         return ExecutionProfile(
             level='L3',
             use_embeddings=False,
+            semantic_pipeline_enabled=False,
             compute_category_transition=False,
             low_priority_speech_ratio_below=self._base_low_priority_speech_ratio_below * 4.0,
+            analysis_mode='semantic_suppressed',
+            signal_validity={
+                'semantic_indecision': False,
+                'audio_aggregate': False,
+            },
+            suppression_reasons=[
+                'semantic_feedback_suppressed_by_severe_degradation',
+                'audio_aggregate_unreliable_under_severe_backpressure',
+            ],
         )
 
     def _apply_profile(self, profile: ExecutionProfile) -> None:

@@ -45,8 +45,14 @@ class TranscriptionPipelineService:
         self._execution_profile = ExecutionProfile(
             level='L0',
             use_embeddings=True,
+            semantic_pipeline_enabled=True,
             compute_category_transition=True,
             low_priority_speech_ratio_below=0.0,
+            analysis_mode='full_semantic',
+            signal_validity={
+                'semantic_indecision': True,
+                'audio_aggregate': True,
+            },
         )
 
     def set_execution_profile(self, profile: ExecutionProfile) -> None:

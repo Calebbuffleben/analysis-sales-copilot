@@ -5,6 +5,10 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from typing import Deque, Dict, Optional
 
+from ...metrics.realtime_metrics import (
+    ANALYSIS_FULL_SIGNAL_TOTAL,
+    ANALYSIS_SUPPRESSED_BY_QUALITY_TOTAL,
+)
 from .sbert_analyzer import SBertAnalyzer
 from .semantic_pipeline import SemanticPipeline
 from .signals.indecision_signal import IndecisionSignalDetector
@@ -44,9 +48,23 @@ class TextAnalysisService:
         execution_profile: ExecutionProfile,
     ) -> TextAnalysisResult:
         """Analyze text and return a normalized analysis result."""
-        semantic_result = self.semantic_pipeline.run(
-            chunk.text,
-            use_embeddings=execution_profile.use_embeddings,
+        semantic_result = (
+            self.semantic_pipeline.run(
+                chunk.text,
+                use_embeddings=execution_profile.use_embeddings,
+            )
+            if execution_profile.semantic_pipeline_enabled
+            else {
+                'embedding': [],
+                'keywords': self.semantic_pipeline.sbert_analyzer.extract_keywords(
+                    chunk.text,
+                ),
+                'sales_category': None,
+                'sales_category_confidence': None,
+                'category_intensity': None,
+                'category_ambiguity': None,
+                'category_flags': {},
+            }
         )
         context_key = self._get_context_key(chunk)
         history = list(self._history[context_key])
@@ -83,7 +101,15 @@ class TextAnalysisService:
             conditional_keywords_detected=conditional_keywords,
             indecision_metrics=indecision_metrics,
             category_transition=category_transition,
+            analysis_mode=execution_profile.analysis_mode,
+            degradation_level=execution_profile.level,
+            signal_validity=dict(execution_profile.signal_validity),
+            suppression_reasons=list(execution_profile.suppression_reasons),
         )
+        if any(not is_valid for is_valid in result.signal_validity.values()):
+            ANALYSIS_SUPPRESSED_BY_QUALITY_TOTAL.inc()
+        else:
+            ANALYSIS_FULL_SIGNAL_TOTAL.inc()
 
         self._history[context_key].append(
             {

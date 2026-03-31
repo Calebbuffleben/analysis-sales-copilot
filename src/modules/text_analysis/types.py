@@ -36,6 +36,10 @@ class TextAnalysisResult:
     samples_count: Optional[int] = None
     speech_count: Optional[int] = None
     mean_rms_dbfs: Optional[float] = None
+    analysis_mode: Optional[str] = None
+    degradation_level: Optional[str] = None
+    signal_validity: Dict[str, bool] = field(default_factory=dict)
+    suppression_reasons: List[str] = field(default_factory=list)
 
     def to_payload_dict(self) -> Dict[str, Any]:
         """Convert the analysis result to a payload-friendly dict."""
@@ -66,5 +70,13 @@ class TextAnalysisResult:
             payload['speech_count'] = self.speech_count
         if self.mean_rms_dbfs is not None:
             payload['mean_rms_dbfs'] = self.mean_rms_dbfs
+        if self.analysis_mode:
+            payload['analysis_mode'] = self.analysis_mode
+        if self.degradation_level:
+            payload['degradation_level'] = self.degradation_level
+        if self.signal_validity:
+            payload['signal_validity'] = self.signal_validity
+        if self.suppression_reasons:
+            payload['suppression_reasons'] = self.suppression_reasons
 
         return payload

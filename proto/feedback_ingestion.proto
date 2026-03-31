@@ -25,6 +25,10 @@ message AnalysisPayload {
   int32 samples_count = 11;
   int32 speech_count = 12;
   float mean_rms_dbfs = 13;
+  string analysis_mode = 14;
+  string degradation_level = 15;
+  map<string, bool> signal_validity = 16;
+  repeated string suppression_reasons = 17;
 }
 
 message PublishFeedbackRequest {

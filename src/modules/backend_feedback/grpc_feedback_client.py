@@ -86,6 +86,14 @@ class BackendFeedbackClient:
             request.analysis.speech_count = analysis.speech_count
         if analysis.mean_rms_dbfs is not None:
             request.analysis.mean_rms_dbfs = analysis.mean_rms_dbfs
+        if analysis.analysis_mode:
+            request.analysis.analysis_mode = analysis.analysis_mode
+        if analysis.degradation_level:
+            request.analysis.degradation_level = analysis.degradation_level
+        if analysis.signal_validity:
+            request.analysis.signal_validity.update(analysis.signal_validity)
+        if analysis.suppression_reasons:
+            request.analysis.suppression_reasons.extend(analysis.suppression_reasons)
 
         if analysis.indecision_metrics:
             indecision_metrics = analysis.indecision_metrics

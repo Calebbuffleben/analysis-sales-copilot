@@ -174,3 +174,15 @@ FEEDBACK_PUBLISH_ERRORS_TOTAL = _metric_or_noop(
     'Total feedback publish errors in Python gRPC client.',
 )
 
+ANALYSIS_SUPPRESSED_BY_QUALITY_TOTAL = _metric_or_noop(
+    Counter,
+    'analysis_suppressed_by_quality_total',
+    'Total analyzed windows that had one or more signal families suppressed for precision.',
+)
+
+ANALYSIS_FULL_SIGNAL_TOTAL = _metric_or_noop(
+    Counter,
+    'analysis_full_signal_total',
+    'Total analyzed windows processed with full signal validity.',
+)
+
