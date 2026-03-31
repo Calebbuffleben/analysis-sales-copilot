@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 DegradationLevel = Literal['L0', 'L1', 'L2', 'L3']
-AnalysisMode = Literal['full_semantic', 'semantic_suppressed']
+AnalysisMode = Literal['full_semantic', 'semantic_suppressed', 'audio_only']
 
 
 @dataclass(frozen=True)

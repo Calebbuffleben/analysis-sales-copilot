@@ -37,6 +37,8 @@ class DegradationController:
         l3_queue_age_ms: int = 5000,
         # hysteresis (upgrade requires stricter recency)
         hysteresis_factor: float = 0.7,
+        recovery_consecutive_evals: int = 3,
+        min_level_hold_ms: int = 2000,
         # publish queue influence
         publish_queue_l2_ratio: float = 0.8,
         publish_queue_l3_ratio: float = 0.95,
@@ -52,11 +54,15 @@ class DegradationController:
         self._l2_queue_age_ms = l2_queue_age_ms
         self._l3_queue_age_ms = l3_queue_age_ms
         self._hysteresis_factor = hysteresis_factor
+        self._recovery_consecutive_evals = max(1, int(recovery_consecutive_evals))
+        self._min_level_hold_ms = max(0, int(min_level_hold_ms))
         self._publish_queue_l2_ratio = publish_queue_l2_ratio
         self._publish_queue_l3_ratio = publish_queue_l3_ratio
 
         self._lock = threading.Lock()
         self._current_level: str = 'L0'
+        self._healthy_eval_streak = 0
+        self._last_transition_monotonic = time.monotonic()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -69,6 +75,8 @@ class DegradationController:
 
         with self._lock:
             self._current_level = 'L0'
+            self._healthy_eval_streak = 0
+            self._last_transition_monotonic = time.monotonic()
 
         self._apply_profile(self._make_profile('L0'))
         self._thread = threading.Thread(
@@ -122,6 +130,7 @@ class DegradationController:
 
         current_level = self._current_level
         if desired_level == current_level:
+            self._healthy_eval_streak = 0
             return
 
         # Stepwise hysteresis to avoid flapping
@@ -130,6 +139,8 @@ class DegradationController:
             self._apply_profile(self._make_profile(desired_level))
             with self._lock:
                 self._current_level = desired_level
+                self._healthy_eval_streak = 0
+                self._last_transition_monotonic = time.monotonic()
             logger.info(
                 '[degradation] level downgrade current=%s desired=%s oldestPendingAgeMs=%s pendingSize=%s publishQ=%s publishMax=%s',
                 current_level,
@@ -142,22 +153,39 @@ class DegradationController:
             return
 
         # upgrade (less degradation) requires stricter recency
-        # We allow upgrading stepwise, not instantly.
-        target_lower_level = desired_level
-        upgrade_allowed_age_ms = self._upgrade_allowed_age_ms(target_lower_level)
+        # We allow upgrading one level at a time, only after several consecutive
+        # healthy evaluations and after holding the current level long enough.
+        next_lower_level = self._step_towards_healthy(current_level)
+        upgrade_allowed_age_ms = self._upgrade_allowed_age_ms(next_lower_level)
         if oldest_pending_age_ms < upgrade_allowed_age_ms:
-            self._apply_profile(self._make_profile(target_lower_level))
-            with self._lock:
-                self._current_level = target_lower_level
-            logger.info(
-                '[degradation] level upgrade current=%s target=%s oldestPendingAgeMs=%s pendingSize=%s publishQ=%s publishMax=%s',
-                current_level,
-                target_lower_level,
-                oldest_pending_age_ms,
-                pending_size,
-                publish_q,
-                publish_max,
-            )
+            self._healthy_eval_streak += 1
+        else:
+            self._healthy_eval_streak = 0
+            return
+
+        held_for_ms = (time.monotonic() - self._last_transition_monotonic) * 1000.0
+        if (
+            self._healthy_eval_streak < self._recovery_consecutive_evals
+            or held_for_ms < self._min_level_hold_ms
+        ):
+            return
+
+        self._apply_profile(self._make_profile(next_lower_level))
+        with self._lock:
+            self._current_level = next_lower_level
+            self._healthy_eval_streak = 0
+            self._last_transition_monotonic = time.monotonic()
+        logger.info(
+            '[degradation] level upgrade current=%s target=%s oldestPendingAgeMs=%s pendingSize=%s publishQ=%s publishMax=%s healthyStreak=%s heldForMs=%.0f',
+            current_level,
+            next_lower_level,
+            oldest_pending_age_ms,
+            pending_size,
+            publish_q,
+            publish_max,
+            self._recovery_consecutive_evals,
+            held_for_ms,
+        )
 
     def _upgrade_allowed_age_ms(self, target_level: str) -> int:
         # Allow upgrades only when queue age is sufficiently below the
@@ -170,6 +198,15 @@ class DegradationController:
         if target_level == 'L2':
             return int(self._l3_queue_age_ms * self._hysteresis_factor)
         return 0
+
+    def _step_towards_healthy(self, current_level: str) -> str:
+        if current_level == 'L3':
+            return 'L2'
+        if current_level == 'L2':
+            return 'L1'
+        if current_level == 'L1':
+            return 'L0'
+        return 'L0'
 
     def _make_profile(self, level: str) -> ExecutionProfile:
         # Map degradation level to execution flags.
@@ -212,11 +249,10 @@ class DegradationController:
                 analysis_mode='semantic_suppressed',
                 signal_validity={
                     'semantic_indecision': False,
-                    'audio_aggregate': False,
+                    'audio_aggregate': True,
                 },
                 suppression_reasons=[
                     'semantic_feedback_suppressed_by_degradation',
-                    'audio_aggregate_unreliable_under_backpressure',
                 ],
             )
         # L3
@@ -229,11 +265,10 @@ class DegradationController:
             analysis_mode='semantic_suppressed',
             signal_validity={
                 'semantic_indecision': False,
-                'audio_aggregate': False,
+                'audio_aggregate': True,
             },
             suppression_reasons=[
                 'semantic_feedback_suppressed_by_severe_degradation',
-                'audio_aggregate_unreliable_under_severe_backpressure',
             ],
         )
 

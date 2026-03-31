@@ -27,10 +27,10 @@ class Settings:
     whisper_default_language: Optional[str] = None
     # STT process parallelism (Phase 5): 0 = in-process + lock; N>=1 = N worker processes,
     # each with its own WhisperModel (true parallel transcribe).
-    stt_process_workers: int = 0
+    stt_process_workers: int = 2
     # Ready-window queue (bounded realtime processing)
     window_queue_max_size: int = 8
-    window_worker_threads: int = 2
+    window_worker_threads: int = 4
     window_max_age_ms: int = 25_000
     window_low_priority_speech_ratio_below: float = 0.02
     # Publish dispatcher (decouple STT/analysis from backend gRPC I/O)
@@ -56,6 +56,8 @@ class Settings:
     degradation_l3_queue_age_ms: int = 5000
     # Lower = harder to upgrade back to L0 (less L0<->L1 flapping when queue breathes).
     degradation_hysteresis_factor: float = 0.55
+    degradation_recovery_consecutive_evals: int = 3
+    degradation_min_level_hold_ms: int = 2000
     degradation_publish_queue_l2_ratio: float = 0.8
     degradation_publish_queue_l3_ratio: float = 0.95
 
@@ -109,9 +111,9 @@ class Settings:
             whisper_default_language=cls._normalize_language(
                 os.getenv('WHISPER_DEFAULT_LANGUAGE'),
             ),
-            stt_process_workers=int(os.getenv('STT_PROCESS_WORKERS', '0')),
+            stt_process_workers=int(os.getenv('STT_PROCESS_WORKERS', '2')),
             window_queue_max_size=int(os.getenv('WINDOW_QUEUE_MAX_SIZE', '8')),
-            window_worker_threads=int(os.getenv('WINDOW_WORKER_THREADS', '2')),
+            window_worker_threads=int(os.getenv('WINDOW_WORKER_THREADS', '4')),
             window_max_age_ms=int(os.getenv('WINDOW_MAX_AGE_MS', '25000')),
             window_low_priority_speech_ratio_below=float(
                 os.getenv('WINDOW_LOW_PRIORITY_SPEECH_RATIO_BELOW', '0.02'),
@@ -147,6 +149,12 @@ class Settings:
             ),
             degradation_hysteresis_factor=float(
                 os.getenv('DEGRADATION_HYSTERESIS_FACTOR', '0.55'),
+            ),
+            degradation_recovery_consecutive_evals=int(
+                os.getenv('DEGRADATION_RECOVERY_CONSECUTIVE_EVALS', '3'),
+            ),
+            degradation_min_level_hold_ms=int(
+                os.getenv('DEGRADATION_MIN_LEVEL_HOLD_MS', '2000'),
             ),
             degradation_publish_queue_l2_ratio=float(
                 os.getenv('DEGRADATION_PUBLISH_QUEUE_L2_RATIO', '0.8'),
@@ -257,6 +265,16 @@ class Settings:
             raise ValueError(
                 'Invalid DEGRADATION_HYSTERESIS_FACTOR: '
                 f'{self.degradation_hysteresis_factor}',
+            )
+        if self.degradation_recovery_consecutive_evals < 1:
+            raise ValueError(
+                'Invalid DEGRADATION_RECOVERY_CONSECUTIVE_EVALS: '
+                f'{self.degradation_recovery_consecutive_evals}',
+            )
+        if self.degradation_min_level_hold_ms < 0:
+            raise ValueError(
+                'Invalid DEGRADATION_MIN_LEVEL_HOLD_MS: '
+                f'{self.degradation_min_level_hold_ms}',
             )
         if not 0.0 <= self.degradation_l1_queue_age_ms < self.degradation_l2_queue_age_ms:
             raise ValueError(

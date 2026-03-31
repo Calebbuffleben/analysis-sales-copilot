@@ -109,6 +109,8 @@ class TranscriptionPipelineService:
                 float(window_end_to_pipeline_start_ms),
             )
 
+        audio_stats = self._compute_audio_window_stats(window_pcm, enriched_meta)
+
         t_stt_start = time.perf_counter()
         transcription = self._transcription_service.transcribe(window_pcm, enriched_meta)
         t_stt_end = time.perf_counter()
@@ -160,7 +162,7 @@ class TranscriptionPipelineService:
             chunk,
             execution_profile=execution_profile,
         )
-        self._apply_audio_window_stats(analysis, window_pcm, enriched_meta)
+        self._apply_audio_window_stats(analysis, audio_stats)
         t_ana_end = time.perf_counter()
         ANALYSIS_MS.observe((t_ana_end - t_ana_start) * 1000.0)
         t_pub_start = time.perf_counter()
@@ -184,6 +186,62 @@ class TranscriptionPipelineService:
             (t_pub_end - t_pub_start) * 1000.0,
             (t_pub_end - t_pipeline_start) * 1000.0,
         )
+
+    def enqueue_audio_aggregate(
+        self,
+        stream_key: str,
+        window_pcm: bytes,
+        meta: dict,
+    ) -> bool:
+        """Publish audio-only aggregate stats without waiting for STT."""
+        with self._profile_lock:
+            execution_profile = self._execution_profile
+        stats = self._compute_audio_window_stats(window_pcm, meta)
+        analysis = TextAnalysisResult(
+            embedding=[],
+            keywords=[],
+            samples_count=int(stats.get('samples_count') or 0),
+            speech_count=int(stats.get('speech_count') or 0),
+            mean_rms_dbfs=(
+                None
+                if stats.get('mean_rms_dbfs') is None
+                else float(stats.get('mean_rms_dbfs'))
+            ),
+            analysis_mode='audio_only',
+            degradation_level=execution_profile.level,
+            signal_validity={
+                'semantic_indecision': False,
+                'audio_aggregate': execution_profile.signal_validity.get(
+                    'audio_aggregate',
+                    True,
+                ),
+            },
+            suppression_reasons=['semantic_not_available_for_audio_only_ingress'],
+        )
+        event = BackendFeedbackEvent(
+            meeting_id=str(meta['meeting_id']),
+            participant_id=str(meta['participant_id']),
+            participant_name=None,
+            participant_role=None,
+            feedback_type='audio_metrics_ingress',
+            severity='info',
+            ts_ms=int(meta['window_end_ms']),
+            window_start_ms=int(meta['window_start_ms']),
+            window_end_ms=int(meta['window_end_ms']),
+            message='Audio aggregate ingress event',
+            transcript_text='',
+            transcript_confidence=0.0,
+            analysis=analysis,
+        )
+        try:
+            return self._publish_dispatcher.enqueue(event)
+        except Exception as exc:
+            logger.exception(
+                'Audio aggregate publish enqueue failed | stream_key=%s | error=%s',
+                stream_key,
+                exc,
+            )
+            return False
 
     def _handle_transcript(
         self,
@@ -225,20 +283,22 @@ class TranscriptionPipelineService:
             analysis=analysis,
         )
 
-    def _apply_audio_window_stats(
-        self,
-        analysis: TextAnalysisResult,
-        window_pcm: bytes,
-        meta: dict,
-    ) -> None:
-        """Attach audio-window stats used by backend feedback rules."""
+    def _compute_audio_window_stats(self, window_pcm: bytes, meta: dict) -> dict:
+        """Compute PCM window stats once so text and audio feedback reuse them."""
         channels = max(int(meta.get('channels', 1)), 1)
         sample_rate = int(meta.get('sample_rate', 0) or 0)
-        stats = compute_pcm_window_stats(
+        return compute_pcm_window_stats(
             window_pcm,
             sample_rate=sample_rate,
             channels=channels,
         )
+
+    def _apply_audio_window_stats(
+        self,
+        analysis: TextAnalysisResult,
+        stats: dict,
+    ) -> None:
+        """Attach audio-window stats used by backend feedback rules."""
         analysis.samples_count = int(stats.get('samples_count') or 0)
         analysis.speech_count = int(stats.get('speech_count') or 0)
         mean = stats.get('mean_rms_dbfs')

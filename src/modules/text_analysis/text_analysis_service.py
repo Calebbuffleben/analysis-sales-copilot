@@ -52,6 +52,7 @@ class TextAnalysisService:
             self.semantic_pipeline.run(
                 chunk.text,
                 use_embeddings=execution_profile.use_embeddings,
+                include_payload_embedding=False,
             )
             if execution_profile.semantic_pipeline_enabled
             else {

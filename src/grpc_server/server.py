@@ -190,9 +190,16 @@ def create_server(config: Settings) -> grpc.Server:
         max_age_ms=config.window_max_age_ms,
         low_priority_speech_ratio_below=config.window_low_priority_speech_ratio_below,
     )
-    audio_buffer_service.register_window_callback(
-        lambda sk, pcm, meta: ready_window_dispatcher.enqueue(sk, pcm, meta),
-    )
+
+    def on_window_ready(stream_key: str, window_pcm: bytes, meta: dict) -> bool:
+        transcription_pipeline_service.enqueue_audio_aggregate(
+            stream_key,
+            window_pcm,
+            meta,
+        )
+        return ready_window_dispatcher.enqueue(stream_key, window_pcm, meta)
+
+    audio_buffer_service.register_window_callback(on_window_ready)
     audio_service = AudioService(audio_buffer_service=audio_buffer_service)
     servicer = AudioPipelineServicer(audio_service)
 
@@ -221,6 +228,16 @@ def create_server(config: Settings) -> grpc.Server:
         config.window_max_age_ms,
         config.window_low_priority_speech_ratio_below,
     )
+    if (
+        config.stt_process_workers > 0
+        and config.window_worker_threads < config.stt_process_workers
+    ):
+        logger.warning(
+            'WINDOW_WORKER_THREADS < STT_PROCESS_WORKERS | worker_threads=%s | process_workers=%s | '
+            'STT throughput may be capped by dispatcher threads',
+            config.window_worker_threads,
+            config.stt_process_workers,
+        )
     logger.info(
         'Backend feedback publish | GRPC_FEEDBACK_ENABLED=%s | GRPC_FEEDBACK_URL=%s | '
         'PUBLISH_QUEUE_MAX_SIZE=%s | PUBLISH_WORKER_THREADS=%s | PUBLISH_MAX_AGE_MS=%s',
@@ -248,6 +265,8 @@ def create_server(config: Settings) -> grpc.Server:
         l2_queue_age_ms=config.degradation_l2_queue_age_ms,
         l3_queue_age_ms=config.degradation_l3_queue_age_ms,
         hysteresis_factor=config.degradation_hysteresis_factor,
+        recovery_consecutive_evals=config.degradation_recovery_consecutive_evals,
+        min_level_hold_ms=config.degradation_min_level_hold_ms,
         publish_queue_l2_ratio=config.degradation_publish_queue_l2_ratio,
         publish_queue_l3_ratio=config.degradation_publish_queue_l3_ratio,
     )
