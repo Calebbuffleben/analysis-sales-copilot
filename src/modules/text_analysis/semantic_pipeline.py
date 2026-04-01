@@ -14,8 +14,10 @@ class SemanticPipeline:
     def run(self, text: str, *, use_embeddings: bool = True) -> dict:
         """Run semantic analysis and return normalized fields.
 
-        When `use_embeddings` is False, we force heuristic category scoring and
-        never generate semantic embeddings (saves CPU/GPU).
+        `TextAnalysisService` always uses `use_embeddings=True` in production.
+        `use_embeddings=False` skips embedding generation and uses heuristic
+        category scoring only (tests / experiments); not wired to any load
+        controller.
         """
         category, confidence, _, ambiguity, intensity, flags = (
             self.sbert_analyzer.classify_categories(

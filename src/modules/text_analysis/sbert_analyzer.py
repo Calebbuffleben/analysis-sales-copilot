@@ -137,7 +137,11 @@ class SBertAnalyzer:
         *,
         use_embeddings: bool = True,
     ) -> Tuple[Optional[str], float, Dict[str, float], float, float, Dict[str, bool]]:
-        """Classify text into a sales-related semantic category."""
+        """Classify text into a sales-related semantic category.
+
+        Production always passes ``use_embeddings=True``. ``False`` uses only
+        heuristics (tests or ad-hoc calls).
+        """
         scores = self._score_categories(text, use_embeddings=use_embeddings)
         if not scores:
             return None, 0.0, {}, 0.0, 0.0, {}

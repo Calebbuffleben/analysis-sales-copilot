@@ -103,37 +103,6 @@ class ReadyWindowDispatcher:
         for t in self._workers:
             t.join(timeout=timeout / max(len(self._workers), 1))
 
-    def set_low_priority_speech_ratio_below(self, value: float) -> None:
-        """Update low-priority admission threshold at runtime."""
-        with self._lock:
-            self._low_pri_below = float(value)
-
-    def get_pending_size(self) -> int:
-        """Number of pending windows (not inflight)."""
-        with self._lock:
-            return len(self._pending)
-
-    def get_oldest_pending_age_ms(self) -> int:
-        """
-        Oldest pending window age computed from min(window_end_ms) in pending.
-        """
-        with self._lock:
-            if not self._pending:
-                return 0
-            window_end_ms_values: list[int] = []
-            for item in self._pending.values():
-                try:
-                    v = int(item.meta.get('window_end_ms', 0) or 0)
-                except (TypeError, ValueError):
-                    v = 0
-                if v > 0:
-                    window_end_ms_values.append(v)
-            if not window_end_ms_values:
-                return 0
-            now_ms = int(time.time() * 1000)
-            oldest_end_ms = min(window_end_ms_values)
-            return max(0, now_ms - oldest_end_ms)
-
     def enqueue(self, stream_key: str, window_pcm: bytes, meta: dict[str, Any]) -> bool:
         """Enqueue a ready window. Returns False if dropped before scheduling."""
         now_ms = int(time.time() * 1000)

@@ -1,4 +1,4 @@
-"""Degradation behavior tests for semantic pipeline."""
+"""Tests for SemanticPipeline (embedding toggle and category path)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from src.modules.text_analysis.semantic_pipeline import SemanticPipeline
 from src.modules.text_analysis.sbert_analyzer import SBertAnalyzer
 
 
-class TestSemanticPipelineDegradation(unittest.TestCase):
+class TestSemanticPipeline(unittest.TestCase):
     def test_use_embeddings_false_returns_empty_embedding(self) -> None:
         pipeline = SemanticPipeline(SBertAnalyzer())
 
@@ -25,4 +25,3 @@ class TestSemanticPipelineDegradation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
