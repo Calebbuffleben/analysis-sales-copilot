@@ -89,13 +89,6 @@ class AudioService:
             chunk_size=chunk_size
         )
 
-        # Log chunk details
-        logger.info(
-            f"📥 Audio RECEIVED | meetingId={meeting_id} | "
-            f"participantId={participant_id} | chunk={sequence} | "
-            f"size={chunk_size}bytes | timestamp={timestamp_ms}ms"
-        )
-
         # Log statistics every 100 chunks
         if stats and stats.chunks_received % 100 == 0:
             logger.info(
