@@ -22,7 +22,6 @@ from ..modules.audio_buffer.sliding_worker import SlidingWindowWorker
 from ..modules.backend_feedback.grpc_feedback_client import BackendFeedbackClient
 from ..modules.backend_feedback.publish_dispatcher import PublishDispatcher
 from ..modules.text_analysis.text_analysis_service import TextAnalysisService
-from ..modules.transcription.degradation_controller import DegradationController
 from ..modules.transcription.ready_window_dispatcher import ReadyWindowDispatcher
 from ..modules.transcription.transcription_pipeline_service import (
     TranscriptionPipelineService,
@@ -236,23 +235,6 @@ def create_server(config: Settings) -> grpc.Server:
         _warmup_ml_models(transcription_service, text_analysis_service)
     else:
         logger.info('PRELOAD_ML_MODELS=false — models load on first use')
-
-    degradation_controller = DegradationController(
-        scheduler=ready_window_dispatcher,
-        pipeline_service=transcription_pipeline_service,
-        publish_dispatcher=publish_dispatcher,
-        base_low_priority_speech_ratio_below=config.window_low_priority_speech_ratio_below,
-        degradation_enabled=config.degradation_enabled,
-        eval_interval_ms=config.degradation_eval_interval_ms,
-        l1_queue_age_ms=config.degradation_l1_queue_age_ms,
-        l2_queue_age_ms=config.degradation_l2_queue_age_ms,
-        l3_queue_age_ms=config.degradation_l3_queue_age_ms,
-        hysteresis_factor=config.degradation_hysteresis_factor,
-        publish_queue_l2_ratio=config.degradation_publish_queue_l2_ratio,
-        publish_queue_l3_ratio=config.degradation_publish_queue_l3_ratio,
-    )
-    degradation_controller.start()
-
     return server
 
 

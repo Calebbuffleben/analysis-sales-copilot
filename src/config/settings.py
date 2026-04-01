@@ -48,16 +48,6 @@ class Settings:
     # Load Whisper + sentence-transformers before accepting traffic (avoids multi-minute
     # delay on first real-time window from HF download + model init).
     preload_ml_models: bool = True
-    # Runtime degradation (control plane)
-    degradation_enabled: bool = True
-    degradation_eval_interval_ms: int = 500
-    degradation_l1_queue_age_ms: int = 1000
-    degradation_l2_queue_age_ms: int = 2500
-    degradation_l3_queue_age_ms: int = 5000
-    # Lower = harder to upgrade back to L0 (less L0<->L1 flapping when queue breathes).
-    degradation_hysteresis_factor: float = 0.55
-    degradation_publish_queue_l2_ratio: float = 0.8
-    degradation_publish_queue_l3_ratio: float = 0.95
 
     @classmethod
     def from_env(cls) -> 'Settings':
@@ -132,28 +122,6 @@ class Settings:
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             proto_dir=os.getenv('PROTO_DIR'),
             preload_ml_models=os.getenv('PRELOAD_ML_MODELS', 'true').lower() == 'true',
-            degradation_enabled=os.getenv('DEGRADATION_ENABLED', 'true').lower() == 'true',
-            degradation_eval_interval_ms=int(
-                os.getenv('DEGRADATION_EVAL_INTERVAL_MS', '500'),
-            ),
-            degradation_l1_queue_age_ms=int(
-                os.getenv('DEGRADATION_L1_QUEUE_AGE_MS', '1000'),
-            ),
-            degradation_l2_queue_age_ms=int(
-                os.getenv('DEGRADATION_L2_QUEUE_AGE_MS', '2500'),
-            ),
-            degradation_l3_queue_age_ms=int(
-                os.getenv('DEGRADATION_L3_QUEUE_AGE_MS', '5000'),
-            ),
-            degradation_hysteresis_factor=float(
-                os.getenv('DEGRADATION_HYSTERESIS_FACTOR', '0.55'),
-            ),
-            degradation_publish_queue_l2_ratio=float(
-                os.getenv('DEGRADATION_PUBLISH_QUEUE_L2_RATIO', '0.8'),
-            ),
-            degradation_publish_queue_l3_ratio=float(
-                os.getenv('DEGRADATION_PUBLISH_QUEUE_L3_RATIO', '0.95'),
-            ),
         )
 
     @staticmethod
@@ -247,42 +215,6 @@ class Settings:
             )
         if self.metrics_port < 1 or self.metrics_port > 65535:
             raise ValueError(f'Invalid METRICS_PORT: {self.metrics_port}')
-
-        if self.degradation_eval_interval_ms < 50:
-            raise ValueError(
-                'Invalid DEGRADATION_EVAL_INTERVAL_MS: '
-                f'{self.degradation_eval_interval_ms}',
-            )
-        if not 0.0 < self.degradation_hysteresis_factor <= 1.0:
-            raise ValueError(
-                'Invalid DEGRADATION_HYSTERESIS_FACTOR: '
-                f'{self.degradation_hysteresis_factor}',
-            )
-        if not 0.0 <= self.degradation_l1_queue_age_ms < self.degradation_l2_queue_age_ms:
-            raise ValueError(
-                'Invalid degradation queue age thresholds: '
-                f'L1={self.degradation_l1_queue_age_ms} L2={self.degradation_l2_queue_age_ms}',
-            )
-        if not 0.0 <= self.degradation_l2_queue_age_ms < self.degradation_l3_queue_age_ms:
-            raise ValueError(
-                'Invalid degradation queue age thresholds: '
-                f'L2={self.degradation_l2_queue_age_ms} L3={self.degradation_l3_queue_age_ms}',
-            )
-        if not 0.0 < self.degradation_publish_queue_l2_ratio <= 1.0:
-            raise ValueError(
-                'Invalid DEGRADATION_PUBLISH_QUEUE_L2_RATIO: '
-                f'{self.degradation_publish_queue_l2_ratio}',
-            )
-        if not 0.0 < self.degradation_publish_queue_l3_ratio <= 1.0:
-            raise ValueError(
-                'Invalid DEGRADATION_PUBLISH_QUEUE_L3_RATIO: '
-                f'{self.degradation_publish_queue_l3_ratio}',
-            )
-        if self.degradation_publish_queue_l3_ratio < self.degradation_publish_queue_l2_ratio:
-            raise ValueError(
-                'Invalid degradation publish ratios: '
-                f'L2={self.degradation_publish_queue_l2_ratio} L3={self.degradation_publish_queue_l3_ratio}',
-            )
 
 
 # Global settings instance

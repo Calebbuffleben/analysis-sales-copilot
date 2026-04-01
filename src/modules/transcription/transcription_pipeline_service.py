@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import time
-import threading
 from typing import Optional
 
 from ..audio_buffer.audio_diagnostics import compute_pcm_window_stats
@@ -12,7 +11,7 @@ from ..backend_feedback.publish_dispatcher import PublishDispatcher
 from ..backend_feedback.types import BackendFeedbackEvent
 from ..text_analysis.text_analysis_service import TextAnalysisService
 from ..text_analysis.types import TextAnalysisResult, TranscriptionChunk
-from .execution_profile import ExecutionProfile
+
 from ...metrics.realtime_metrics import (
     ANALYSIS_MS,
     PIPELINE_TOTAL_MS,
@@ -41,18 +40,7 @@ class TranscriptionPipelineService:
         self._publish_dispatcher = publish_dispatcher
         self._default_language = self._normalize_language(default_language)
         self._stream_language_hints: dict[str, str] = {}
-        self._profile_lock = threading.Lock()
-        self._execution_profile = ExecutionProfile(
-            level='L0',
-            use_embeddings=True,
-            compute_category_transition=True,
-            low_priority_speech_ratio_below=0.0,
-        )
 
-    def set_execution_profile(self, profile: ExecutionProfile) -> None:
-        """Called by DegradationController to update execution flags."""
-        with self._profile_lock:
-            self._execution_profile = profile
 
     def _on_window_ready(
         self,
@@ -148,12 +136,7 @@ class TranscriptionPipelineService:
             window_end_ms=int(enriched_meta['window_end_ms']),
         )
         t_ana_start = time.perf_counter()
-        with self._profile_lock:
-            execution_profile = self._execution_profile
-        analysis = self._text_analysis_service.analyze(
-            chunk,
-            execution_profile=execution_profile,
-        )
+        analysis = self._text_analysis_service.analyze(chunk)
         self._apply_audio_window_stats(analysis, window_pcm, enriched_meta)
         t_ana_end = time.perf_counter()
         ANALYSIS_MS.observe((t_ana_end - t_ana_start) * 1000.0)
