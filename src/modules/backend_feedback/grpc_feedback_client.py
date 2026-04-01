@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 import grpc
 
+from ...feedback_trace import log_feedback_trace, make_feedback_trace_id
 from .types import BackendFeedbackEvent
 from ...metrics.realtime_metrics import FEEDBACK_PUBLISH_ERRORS_TOTAL
 
@@ -128,18 +129,27 @@ class BackendFeedbackClient:
             raise
 
         transcript_chars = len(event.transcript_text or '')
-        logger.info(
-            '📨 Feedback published | meetingId=%s | participantId=%s | type=%s | '
-            'transcript_chars=%s | window=[%s..%s]',
+        publish_grpc_ms = (t1 - t0) * 1000.0
+        tid = make_feedback_trace_id(
             event.meeting_id,
             event.participant_id,
-            event.feedback_type,
-            transcript_chars,
-            event.window_start_ms,
-            event.window_end_ms,
+            int(event.window_end_ms),
         )
-
-        publish_grpc_ms = (t1 - t0) * 1000.0
+        log_feedback_trace(
+            logger,
+            logging.INFO,
+            'python.publish',
+            trace_id=tid,
+            meeting_id=event.meeting_id,
+            participant_id=event.participant_id,
+            window_end_ms=int(event.window_end_ms),
+            extra={
+                'feedbackType': event.feedback_type,
+                'grpcMs': round(publish_grpc_ms, 1),
+                'transcriptChars': transcript_chars,
+                'windowStartMs': int(event.window_start_ms),
+            },
+        )
         return publish_grpc_ms
 
     def _initialize_stub(self) -> None:

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
+from typing import Any, Optional
 
+from ...feedback_trace import log_feedback_trace, make_feedback_trace_id
 from ..audio_buffer.audio_diagnostics import compute_pcm_window_stats
 from ..backend_feedback.publish_dispatcher import PublishDispatcher
 from ..backend_feedback.types import BackendFeedbackEvent
@@ -148,18 +149,43 @@ class TranscriptionPipelineService:
             WINDOW_PROCESSED_TOTAL.inc()
 
         PIPELINE_TOTAL_MS.observe((t_pub_end - t_pipeline_start) * 1000.0)
-        logger.info(
-            '⏱️ Pipeline latency | stream_key=%s | queue_wait_ms=%s | '
-            'window_end_to_pipeline_start_ms=%s | publish_enqueued=%s | '
-            'stt_ms=%.1f | analysis_ms=%.1f | enqueue_ms=%.1f | total_ms=%.1f',
-            stream_key,
-            queue_wait_ms,
-            window_end_to_pipeline_start_ms,
-            published_enqueued,
-            (t_stt_end - t_stt_start) * 1000.0,
-            (t_ana_end - t_ana_start) * 1000.0,
-            (t_pub_end - t_pub_start) * 1000.0,
-            (t_pub_end - t_pipeline_start) * 1000.0,
+        stt_ms = (t_stt_end - t_stt_start) * 1000.0
+        analysis_ms = (t_ana_end - t_ana_start) * 1000.0
+        enqueue_ms = (t_pub_end - t_pub_start) * 1000.0
+        total_ms = (t_pub_end - t_pipeline_start) * 1000.0
+        tid = make_feedback_trace_id(
+            chunk.meeting_id,
+            chunk.participant_id,
+            chunk.window_end_ms,
+        )
+        im = analysis.indecision_metrics or {}
+        flags_true: dict[str, Any] = {
+            k: v for k, v in analysis.category_flags.items() if v
+        }
+        log_feedback_trace(
+            logger,
+            logging.INFO,
+            'python.pipeline',
+            trace_id=tid,
+            meeting_id=chunk.meeting_id,
+            participant_id=chunk.participant_id,
+            window_end_ms=chunk.window_end_ms,
+            extra={
+                'streamKey': stream_key,
+                'queueWaitMs': queue_wait_ms,
+                'windowEndToPipelineStartMs': window_end_to_pipeline_start_ms,
+                'publishEnqueued': published_enqueued,
+                'sttMs': round(stt_ms, 1),
+                'analysisMs': round(analysis_ms, 1),
+                'enqueueMs': round(enqueue_ms, 1),
+                'totalMs': round(total_ms, 1),
+                'salesCategory': analysis.sales_category,
+                'categoryIntensity': analysis.category_intensity,
+                'flagsTrue': flags_true if flags_true else None,
+                'indecisionCond': im.get('conditional_language_score'),
+                'indecisionPost': im.get('postponement_likelihood'),
+                'transcriptChars': len(chunk.text or ''),
+            },
         )
 
     def _handle_transcript(
