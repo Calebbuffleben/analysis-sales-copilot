@@ -162,7 +162,9 @@ def create_server(config: Settings) -> grpc.Server:
         default_language=config.whisper_default_language,
         process_workers=config.stt_process_workers,
     )
-    text_analysis_service = TextAnalysisService()
+    text_analysis_service = TextAnalysisService(
+        sbert_model_name=config.sbert_model_name,
+    )
     backend_feedback_client = BackendFeedbackClient(
         service_url=config.grpc_feedback_url,
         enabled=config.grpc_feedback_enabled,
@@ -212,6 +214,7 @@ def create_server(config: Settings) -> grpc.Server:
         config.whisper_low_energy_dbfs,
         config.whisper_default_language,
     )
+    logger.info('SBERT model | SBERT_MODEL_NAME=%s', config.sbert_model_name)
     logger.info(
         'Window queue | WINDOW_QUEUE_MAX_SIZE=%s | WINDOW_WORKER_THREADS=%s | '
         'WINDOW_MAX_AGE_MS=%s | WINDOW_LOW_PRIORITY_SPEECH_RATIO_BELOW=%s',

@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class SBertAnalyzer:
     """Provide embeddings and lightweight semantic classification."""
 
-    DEFAULT_MODEL_NAME = 'all-MiniLM-L6-v2'
+    DEFAULT_MODEL_NAME = 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'
     STOPWORDS = {
         'a', 'o', 'os', 'as', 'de', 'do', 'da', 'dos', 'das', 'e', 'em', 'no',
         'na', 'nos', 'nas', 'um', 'uma', 'uns', 'umas', 'para', 'por', 'com',

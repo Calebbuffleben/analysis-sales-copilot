@@ -19,8 +19,11 @@ class TextAnalysisService:
         self,
         sbert_analyzer: Optional[SBertAnalyzer] = None,
         indecision_detector: Optional[IndecisionSignalDetector] = None,
+        sbert_model_name: Optional[str] = None,
     ):
-        self.sbert_analyzer = sbert_analyzer or SBertAnalyzer()
+        self.sbert_analyzer = sbert_analyzer or SBertAnalyzer(
+            model_name=sbert_model_name or SBertAnalyzer.DEFAULT_MODEL_NAME,
+        )
         self.semantic_pipeline = SemanticPipeline(self.sbert_analyzer)
         self.indecision_detector = indecision_detector or IndecisionSignalDetector()
         self._history: Dict[str, Deque[dict]] = defaultdict(lambda: deque(maxlen=20))
