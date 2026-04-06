@@ -50,7 +50,14 @@ class TextAnalysisService:
             
         current_state = self._state[context_key]
         
+        # log is defined inside the file, but we'll use print or proper logger here.
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[Step 4] Enviando prompt para o Gemini com estado: {current_state}")
+        
         analysis_result = self.gemini_analyzer.analyze(chunk.text, current_state)
+        
+        logger.info(f"[Step 5] Retorno do Gemini recebido. Feedback: {analysis_result.get('direct_feedback')} | Novo estado: {analysis_result.get('conversation_state')}")
         
         # Update our cached state
         self._state[context_key] = analysis_result['conversation_state']

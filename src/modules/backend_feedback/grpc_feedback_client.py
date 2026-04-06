@@ -76,6 +76,7 @@ class BackendFeedbackClient:
             request.analysis.mean_rms_dbfs = analysis.mean_rms_dbfs
 
         try:
+            logger.info(f"[Step 6] Enviando feedback gerado pelo Gemini via gRPC para o backend")
             t0 = time.perf_counter()
             self._stub.PublishFeedback(
                 request,

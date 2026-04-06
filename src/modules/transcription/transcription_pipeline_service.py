@@ -61,6 +61,7 @@ class TranscriptionPipelineService:
         """Process one ready window: STT, analysis, publish."""
         t_pipeline_start = time.perf_counter()
         t_wall_pipeline_start_ms = int(time.time() * 1000)
+        logger.info(f"[Step 1] Início do processamento da janela de áudio (stream={stream_key})")
         enriched_meta = dict(meta)
         configured_language = self._default_language
         if configured_language:
@@ -96,6 +97,7 @@ class TranscriptionPipelineService:
         transcription = self._transcription_service.transcribe(window_pcm, enriched_meta)
         t_stt_end = time.perf_counter()
 
+        logger.info(f"[Step 2] Transcrição concluída: '{transcription.text}'")
         STT_MS.observe((t_stt_end - t_stt_start) * 1000.0)
         if not transcription.text.strip():
             WINDOW_SKIPPED_EMPTY_TOTAL.inc()
@@ -142,6 +144,7 @@ class TranscriptionPipelineService:
             window_start_ms=int(enriched_meta['window_start_ms']),
             window_end_ms=int(enriched_meta['window_end_ms']),
         )
+        logger.info(f"[Step 3] Enviando transcrição para análise do Gemini")
         t_ana_start = time.perf_counter()
         analysis = self._text_analysis_service.analyze(chunk)
         self._apply_audio_window_stats(analysis, window_pcm, enriched_meta)
