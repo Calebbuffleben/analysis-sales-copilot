@@ -87,7 +87,7 @@ def _warmup_ml_models(
     transcription_service: TranscriptionService,
     text_analysis_service: TextAnalysisService,
 ) -> None:
-    """Load Whisper and SBERT before the first audio window (avoids cold-start lag)."""
+    """Load Whisper before the first audio window (avoids cold-start lag)."""
     t0 = time.perf_counter()
     try:
         transcription_service.preload_model()
@@ -95,9 +95,10 @@ def _warmup_ml_models(
         logger.exception('Whisper preload failed — first stream may be slow')
     t1 = time.perf_counter()
     try:
-        text_analysis_service.ensure_model_loaded()
+        # Preloading is not required for Gemini Analyzer API context
+        pass
     except Exception:
-        logger.exception('Sentence-transformers preload failed — first analysis may be slow')
+        logger.exception('LLM loading failed — first analysis may be slow')
     t2 = time.perf_counter()
     logger.info(
         'ML preload complete | whisper_s=%.2f | sbert_s=%.2f | total_s=%.2f',
@@ -162,9 +163,7 @@ def create_server(config: Settings) -> grpc.Server:
         default_language=config.whisper_default_language,
         process_workers=config.stt_process_workers,
     )
-    text_analysis_service = TextAnalysisService(
-        sbert_model_name=config.sbert_model_name,
-    )
+    text_analysis_service = TextAnalysisService()
     backend_feedback_client = BackendFeedbackClient(
         service_url=config.grpc_feedback_url,
         enabled=config.grpc_feedback_enabled,
@@ -214,7 +213,7 @@ def create_server(config: Settings) -> grpc.Server:
         config.whisper_low_energy_dbfs,
         config.whisper_default_language,
     )
-    logger.info('SBERT model | SBERT_MODEL_NAME=%s', config.sbert_model_name)
+    logger.info('Gemini LLM Analyzer enabled')
     logger.info(
         'Window queue | WINDOW_QUEUE_MAX_SIZE=%s | WINDOW_WORKER_THREADS=%s | '
         'WINDOW_MAX_AGE_MS=%s | WINDOW_LOW_PRIORITY_SPEECH_RATIO_BELOW=%s',
