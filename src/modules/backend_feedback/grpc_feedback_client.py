@@ -65,37 +65,15 @@ class BackendFeedbackClient:
         )
 
         analysis = event.analysis
-        request.analysis.embedding.extend(analysis.embedding)
-        request.analysis.keywords.extend(analysis.keywords)
-        if analysis.speech_act:
-            request.analysis.speech_act = analysis.speech_act
-        if analysis.sales_category:
-            request.analysis.sales_category = analysis.sales_category
-        if analysis.sales_category_confidence is not None:
-            request.analysis.sales_category_confidence = analysis.sales_category_confidence
-        if analysis.category_intensity is not None:
-            request.analysis.category_intensity = analysis.category_intensity
-        if analysis.category_ambiguity is not None:
-            request.analysis.category_ambiguity = analysis.category_ambiguity
-        request.analysis.category_flags.update(analysis.category_flags)
-        request.analysis.conditional_keywords_detected.extend(
-            analysis.conditional_keywords_detected,
-        )
+        request.analysis.direct_feedback = analysis.direct_feedback
+        request.analysis.conversation_state_json = analysis.conversation_state_json
+
         if analysis.samples_count is not None:
             request.analysis.samples_count = analysis.samples_count
         if analysis.speech_count is not None:
             request.analysis.speech_count = analysis.speech_count
         if analysis.mean_rms_dbfs is not None:
             request.analysis.mean_rms_dbfs = analysis.mean_rms_dbfs
-
-        if analysis.indecision_metrics:
-            indecision_metrics = analysis.indecision_metrics
-            request.analysis.indecision_metrics.conditional_language_score = float(
-                indecision_metrics.get('conditional_language_score', 0.0),
-            )
-            request.analysis.indecision_metrics.postponement_likelihood = float(
-                indecision_metrics.get('postponement_likelihood', 0.0),
-            )
 
         try:
             t0 = time.perf_counter()

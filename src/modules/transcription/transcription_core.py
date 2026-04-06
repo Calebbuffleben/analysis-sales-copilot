@@ -66,7 +66,7 @@ def transcribe_pcm_window(
 
     mean_rms = stats.get('mean_rms_dbfs')
     if mean_rms is not None and mean_rms < config.low_energy_dbfs_threshold:
-        logger.info(
+        logger.debug(
             '📝 STT skip | reason=low_energy_precheck | meetingId=%s | '
             'participantId=%s | mean_rms_dbfs=%s | threshold=%s',
             meta.get('meeting_id'),

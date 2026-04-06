@@ -99,10 +99,12 @@ class TranscriptionPipelineService:
         STT_MS.observe((t_stt_end - t_stt_start) * 1000.0)
         if not transcription.text.strip():
             WINDOW_SKIPPED_EMPTY_TOTAL.inc()
-            logger.info(
+            skip_msg = (
                 '⏭️ Pipeline skip (empty transcript) | stream_key=%s | reason=%s | '
                 'vad_filter=%s | segments=%s | language=%s | fallback_language=%s | '
-                'stt_ms=%.1f | total_ms=%.1f',
+                'stt_ms=%.1f | total_ms=%.1f'
+            )
+            skip_args = (
                 stream_key,
                 transcription.empty_reason,
                 transcription.vad_filter_used,
@@ -112,6 +114,10 @@ class TranscriptionPipelineService:
                 (t_stt_end - t_stt_start) * 1000.0,
                 (t_stt_end - t_pipeline_start) * 1000.0,
             )
+            if transcription.empty_reason == 'low_energy':
+                logger.debug(skip_msg, *skip_args)
+            else:
+                logger.info(skip_msg, *skip_args)
             return
 
         if (
@@ -158,10 +164,6 @@ class TranscriptionPipelineService:
             chunk.participant_id,
             chunk.window_end_ms,
         )
-        im = analysis.indecision_metrics or {}
-        flags_true: dict[str, Any] = {
-            k: v for k, v in analysis.category_flags.items() if v
-        }
         log_feedback_trace(
             logger,
             logging.INFO,
@@ -179,11 +181,7 @@ class TranscriptionPipelineService:
                 'analysisMs': round(analysis_ms, 1),
                 'enqueueMs': round(enqueue_ms, 1),
                 'totalMs': round(total_ms, 1),
-                'salesCategory': analysis.sales_category,
-                'categoryIntensity': analysis.category_intensity,
-                'flagsTrue': flags_true if flags_true else None,
-                'indecisionCond': im.get('conditional_language_score'),
-                'indecisionPost': im.get('postponement_likelihood'),
+                'hasDirectFeedback': bool(analysis.direct_feedback),
                 'transcriptChars': len(chunk.text or ''),
             },
         )

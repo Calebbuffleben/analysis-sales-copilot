@@ -6,25 +6,12 @@ service FeedbackIngestionService {
   rpc PublishFeedback(PublishFeedbackRequest) returns (PublishFeedbackResponse);
 }
 
-message IndecisionMetrics {
-  float conditional_language_score = 1;
-  float postponement_likelihood = 2;
-}
-
 message AnalysisPayload {
-  repeated float embedding = 1;
-  repeated string keywords = 2;
-  string sales_category = 3;
-  float sales_category_confidence = 4;
-  float category_intensity = 5;
-  float category_ambiguity = 6;
-  map<string, bool> category_flags = 7;
-  repeated string conditional_keywords_detected = 8;
-  IndecisionMetrics indecision_metrics = 9;
-  string speech_act = 10;
-  int32 samples_count = 11;
-  int32 speech_count = 12;
-  float mean_rms_dbfs = 13;
+  string direct_feedback = 1;
+  string conversation_state_json = 2;
+  int32 samples_count = 3;
+  int32 speech_count = 4;
+  float mean_rms_dbfs = 5;
 }
 
 message PublishFeedbackRequest {

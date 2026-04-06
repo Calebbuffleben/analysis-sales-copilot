@@ -22,17 +22,8 @@ class TranscriptionChunk:
 class TextAnalysisResult:
     """Normalized text-analysis result for one transcription window."""
 
-    embedding: List[float] = field(default_factory=list)
-    keywords: List[str] = field(default_factory=list)
-    speech_act: Optional[str] = None
-    sales_category: Optional[str] = None
-    sales_category_confidence: Optional[float] = None
-    category_intensity: Optional[float] = None
-    category_ambiguity: Optional[float] = None
-    category_flags: Dict[str, bool] = field(default_factory=dict)
-    conditional_keywords_detected: List[str] = field(default_factory=list)
-    indecision_metrics: Optional[Dict[str, Any]] = None
-    category_transition: Optional[Dict[str, Any]] = None
+    direct_feedback: str = ""
+    conversation_state_json: str = "{}"
     samples_count: Optional[int] = None
     speech_count: Optional[int] = None
     mean_rms_dbfs: Optional[float] = None
@@ -40,26 +31,10 @@ class TextAnalysisResult:
     def to_payload_dict(self) -> Dict[str, Any]:
         """Convert the analysis result to a payload-friendly dict."""
         payload: Dict[str, Any] = {
-            'embedding': self.embedding,
-            'keywords': self.keywords,
-            'category_flags': self.category_flags,
-            'conditional_keywords_detected': self.conditional_keywords_detected,
+            'direct_feedback': self.direct_feedback,
+            'conversation_state_json': self.conversation_state_json,
         }
 
-        if self.sales_category:
-            payload['sales_category'] = self.sales_category
-        if self.speech_act:
-            payload['speech_act'] = self.speech_act
-        if self.sales_category_confidence is not None:
-            payload['sales_category_confidence'] = self.sales_category_confidence
-        if self.category_intensity is not None:
-            payload['category_intensity'] = self.category_intensity
-        if self.category_ambiguity is not None:
-            payload['category_ambiguity'] = self.category_ambiguity
-        if self.indecision_metrics is not None:
-            payload['indecision_metrics'] = self.indecision_metrics
-        if self.category_transition is not None:
-            payload['category_transition'] = self.category_transition
         if self.samples_count is not None:
             payload['samples_count'] = self.samples_count
         if self.speech_count is not None:

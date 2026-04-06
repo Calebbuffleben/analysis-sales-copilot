@@ -249,7 +249,7 @@ class ReadyWindowDispatcher:
                     self._not_empty.notify()
                 continue
 
-            logger.info(
+            logger.debug(
                 '📥 Window dequeue | stream_key=%s | queue_wait_ms=%s | window_end_ms=%s',
                 stream_key,
                 wait_ms,

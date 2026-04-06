@@ -2,39 +2,31 @@
 
 from __future__ import annotations
 
-from collections import defaultdict, deque
-from typing import Deque, Dict, Optional
+import json
+from typing import Dict, Any, Optional
 
-from .sbert_analyzer import SBertAnalyzer
-from .semantic_pipeline import SemanticPipeline
-from .signals.indecision_signal import IndecisionSignalDetector
+from .gemini_analyzer import GeminiAnalyzer
 from .types import TextAnalysisResult, TranscriptionChunk
-
+from ...config.settings import get_settings
 
 
 class TextAnalysisService:
-    """Analyze transcript text and produce normalized analysis payloads."""
+    """Analyze transcript text and produce normalized analysis payloads using Gemini."""
 
     def __init__(
         self,
-        sbert_analyzer: Optional[SBertAnalyzer] = None,
-        indecision_detector: Optional[IndecisionSignalDetector] = None,
-        sbert_model_name: Optional[str] = None,
+        gemini_analyzer: Optional[GeminiAnalyzer] = None,
     ):
-        self.sbert_analyzer = sbert_analyzer or SBertAnalyzer(
-            model_name=sbert_model_name or SBertAnalyzer.DEFAULT_MODEL_NAME,
+        settings = get_settings()
+        self.gemini_analyzer = gemini_analyzer or GeminiAnalyzer(
+            api_key=settings.gemini_api_key or "",
         )
-        self.semantic_pipeline = SemanticPipeline(self.sbert_analyzer)
-        self.indecision_detector = indecision_detector or IndecisionSignalDetector()
-        self._history: Dict[str, Deque[dict]] = defaultdict(lambda: deque(maxlen=20))
+        # Store state per context_key
+        self._state: Dict[str, Dict[str, Any]] = {}
 
-    def get_analyzer(self) -> SBertAnalyzer:
-        """Get the SBERT analyzer."""
-        return self.sbert_analyzer
-
-    def ensure_model_loaded(self) -> None:
-        """Ensure the model is loaded."""
-        self.sbert_analyzer.load_sbert_model()
+    def get_analyzer(self) -> GeminiAnalyzer:
+        """Get the Gemini analyzer."""
+        return self.gemini_analyzer
 
     def _get_context_key(self, chunk: TranscriptionChunk) -> str:
         """Generate a unique conversational context key."""
@@ -44,90 +36,29 @@ class TextAnalysisService:
         self,
         chunk: TranscriptionChunk,
     ) -> TextAnalysisResult:
-        """Analyze text and return a normalized analysis result."""
-        semantic_result = self.semantic_pipeline.run(
-            chunk.text,
-            use_embeddings=True,
-        )
+        """Analyze text using Gemini and update conversational state."""
         context_key = self._get_context_key(chunk)
-        history = list(self._history[context_key])
-
-        indecision_metrics = self.indecision_detector.analyze(chunk.text)
-        conditional_keywords = self.indecision_detector.detect_conditional_keywords(
-            chunk.text,
-        )
-
-        category_transition = self._detect_category_transition(
-            semantic_result.get('sales_category'),
-            semantic_result.get('sales_category_confidence') or 0.0,
-            history,
-            chunk.timestamp_ms,
-        )
-
+        
+        # Get current state or initialize it
+        if context_key not in self._state:
+            self._state[context_key] = {
+                "interesse": "medio",
+                "resistencia": "baixa",
+                "objecoes_detectadas": [],
+                "engajamento": "medio"
+            }
+            
+        current_state = self._state[context_key]
+        
+        analysis_result = self.gemini_analyzer.analyze(chunk.text, current_state)
+        
+        # Update our cached state
+        self._state[context_key] = analysis_result['conversation_state']
+        
+        # Return the simplified TextAnalysisResult
         result = TextAnalysisResult(
-            embedding=semantic_result.get('embedding', []),
-            keywords=semantic_result.get('keywords', []),
-            speech_act=self._infer_speech_act(
-                chunk.text,
-                conditional_keywords,
-                semantic_result.get('sales_category'),
-            ),
-            sales_category=semantic_result.get('sales_category'),
-            sales_category_confidence=semantic_result.get(
-                'sales_category_confidence',
-            ),
-            category_intensity=semantic_result.get('category_intensity'),
-            category_ambiguity=semantic_result.get('category_ambiguity'),
-            category_flags=semantic_result.get('category_flags', {}),
-            conditional_keywords_detected=conditional_keywords,
-            indecision_metrics=indecision_metrics,
-            category_transition=category_transition,
+            direct_feedback=analysis_result['direct_feedback'],
+            conversation_state_json=json.dumps(analysis_result['conversation_state'], ensure_ascii=False)
         )
 
-        self._history[context_key].append(
-            {
-                'sales_category': result.sales_category,
-                'timestamp_ms': chunk.timestamp_ms,
-                'confidence': result.sales_category_confidence or 0.0,
-            },
-        )
         return result
-
-    def _infer_speech_act(
-        self,
-        text: str,
-        conditional_keywords: list[str],
-        sales_category: Optional[str],
-    ) -> str:
-        """Infer a coarse speech act for downstream feedback rules."""
-        normalized_text = text.strip().lower()
-        if normalized_text.endswith('?'):
-            return 'question'
-        if conditional_keywords:
-            return 'conditional_statement'
-        if sales_category == 'decision_signal':
-            return 'commitment'
-        return 'statement'
-
-    def _detect_category_transition(
-        self,
-        current_category: Optional[str],
-        current_confidence: float,
-        history: list[dict],
-        timestamp_ms: int,
-    ) -> Optional[dict]:
-        """Detect a meaningful category transition from recent context."""
-        if not current_category or not history:
-            return None
-
-        last_item = history[-1]
-        previous_category = last_item.get('sales_category')
-        if not previous_category or previous_category == current_category:
-            return None
-
-        return {
-            'from_category': previous_category,
-            'to_category': current_category,
-            'confidence': current_confidence,
-            'time_delta_ms': max(0, timestamp_ms - int(last_item.get('timestamp_ms', 0))),
-        }

@@ -48,9 +48,8 @@ class Settings:
     # Load Whisper + sentence-transformers before accepting traffic (avoids multi-minute
     # delay on first real-time window from HF download + model init).
     preload_ml_models: bool = True
-    # SBERT model for semantic analysis. Must be a sentence-transformers compatible name.
-    # Default is the multilingual MiniLM model (works well for PT-BR).
-    sbert_model_name: str = 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'
+    # Gemini API Key para analise semantica e feedback
+    gemini_api_key: Optional[str] = None
 
     @classmethod
     def from_env(cls) -> 'Settings':
@@ -125,10 +124,7 @@ class Settings:
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             proto_dir=os.getenv('PROTO_DIR'),
             preload_ml_models=os.getenv('PRELOAD_ML_MODELS', 'true').lower() == 'true',
-            sbert_model_name=os.getenv(
-                'SBERT_MODEL_NAME',
-                'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2',
-            ),
+            gemini_api_key=os.getenv('GEMINI_API_KEY'),
         )
 
     @staticmethod
