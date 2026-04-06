@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
 
 from .gemini_analyzer import GeminiAnalyzer, QuotaExhaustedError
+from .ollama_analyzer import OllamaAnalyzer
 from .llm_state_validator import ConversationState, validate_conversation_state
 from .llm_cache import SimpleTextCache
 from .llm_logger import log_llm_interaction, log_llm_state_change
@@ -53,11 +54,25 @@ class TextAnalysisService:
     def __init__(
         self,
         gemini_analyzer: Optional[GeminiAnalyzer] = None,
+        ollama_analyzer: Optional[OllamaAnalyzer] = None,
     ):
         settings = get_settings()
-        self.gemini_analyzer = gemini_analyzer or GeminiAnalyzer(
-            api_key=settings.gemini_api_key or "",
-        )
+        
+        # Initialize LLM provider based on configuration
+        self.llm_provider = settings.llm_provider
+        
+        if self.llm_provider == 'ollama':
+            self.active_analyzer = ollama_analyzer or OllamaAnalyzer(
+                base_url=settings.ollama_base_url,
+                model=settings.ollama_model,
+                timeout=settings.ollama_timeout,
+            )
+            logger.info(f"Using Ollama LLM provider (model: {settings.ollama_model})")
+        else:  # gemini
+            self.active_analyzer = gemini_analyzer or GeminiAnalyzer(
+                api_key=settings.gemini_api_key or "",
+            )
+            logger.info("Using Gemini LLM provider")
         
         # Thread-safe state storage with metadata
         self._lock = threading.RLock()
@@ -71,9 +86,9 @@ class TextAnalysisService:
             ttl_seconds=3600,  # 1 hour
         )
 
-    def get_analyzer(self) -> GeminiAnalyzer:
-        """Get the Gemini analyzer."""
-        return self.gemini_analyzer
+    def get_analyzer(self):
+        """Get the active LLM analyzer."""
+        return self.active_analyzer
 
     def _get_context_key(self, chunk: TranscriptionChunk) -> str:
         """Generate a unique conversational context key."""
@@ -177,7 +192,7 @@ class TextAnalysisService:
             LLM_CALLS_TOTAL.inc()
             
             try:
-                analysis_result = self.gemini_analyzer.analyze(chunk.text, current_state)
+                analysis_result = self.active_analyzer.analyze(chunk.text, current_state)
                 
                 # Record LLM call duration
                 llm_duration_ms = time.time() * 1000 - llm_start_ms
@@ -216,7 +231,7 @@ class TextAnalysisService:
                 except Exception as fallback_error:
                     # Even fallback failed - return safe empty result
                     logger.error(f"Rule-based fallback also failed: {fallback_error}")
-                    analysis_result = self.gemini_analyzer._default_response(current_state)
+                    analysis_result = self.active_analyzer._default_response(current_state)
                     
             except Exception as e:
                 # LLM failed completely - use rule-based fallback
@@ -237,7 +252,7 @@ class TextAnalysisService:
                 except Exception as fallback_error:
                     # Even fallback failed - return safe empty result
                     logger.error(f"Both LLM and fallback failed: {fallback_error}")
-                    analysis_result = self.gemini_analyzer._default_response(current_state)
+                    analysis_result = self.active_analyzer._default_response(current_state)
             
             # Cache the result (only if it has feedback)
             if analysis_result.get('direct_feedback'):
@@ -249,39 +264,6 @@ class TextAnalysisService:
         self._analyze_counter += 1
         if self._analyze_counter % 100 == 0:
             self._cleanup_expired_states()
-
-        # Call Gemini LLM with fallback chain
-        try:
-            analysis_result = self.gemini_analyzer.analyze(chunk.text, current_state)
-            
-            # Check if LLM returned meaningful result
-            if not analysis_result.get('direct_feedback') and analysis_result.get('confidence', 0) < 0.5:
-                # LLM uncertain - try rule-based fallback
-                logger.debug("LLM returned low confidence, trying rule-based fallback")
-                fallback_result = analyze_text_fallback(chunk.text, current_state)
-                
-                if fallback_result.feedback:
-                    logger.info(
-                        f"Using rule-based fallback: {fallback_result.feedback[:50]}..."
-                    )
-                    analysis_result = fallback_result.to_dict()
-                # else: keep the empty LLM result
-                    
-        except Exception as e:
-            # LLM failed completely - use rule-based fallback
-            logger.warning(f"Gemini LLM failed ({e}), using rule-based fallback")
-            try:
-                fallback_result = analyze_text_fallback(chunk.text, current_state)
-                analysis_result = fallback_result.to_dict()
-                
-                if fallback_result.feedback:
-                    logger.info(
-                        f"Fallback analysis succeeded: {fallback_result.feedback[:50]}..."
-                    )
-            except Exception as fallback_error:
-                # Even fallback failed - return safe empty result
-                logger.error(f"Both LLM and fallback failed: {fallback_error}")
-                analysis_result = self.gemini_analyzer._default_response(current_state)
 
         # Extract results
         direct_feedback = analysis_result.get('direct_feedback', '')

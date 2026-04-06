@@ -48,7 +48,19 @@ class Settings:
     # Load Whisper + sentence-transformers before accepting traffic (avoids multi-minute
     # delay on first real-time window from HF download + model init).
     preload_ml_models: bool = True
-    # Gemini API Key para analise semantica e feedback
+    
+    # ===========================================
+    # LLM Configuration
+    # ===========================================
+    # LLM Provider: 'ollama' (free, local) or 'gemini' (Google API)
+    llm_provider: str = 'ollama'
+    
+    # Ollama settings (for local free inference)
+    ollama_base_url: str = 'http://localhost:11434'
+    ollama_model: str = 'llama3.1:8b'
+    ollama_timeout: int = 30
+    
+    # Gemini settings (if using Google API)
     gemini_api_key: Optional[str] = None
 
     @classmethod
@@ -124,6 +136,11 @@ class Settings:
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             proto_dir=os.getenv('PROTO_DIR'),
             preload_ml_models=os.getenv('PRELOAD_ML_MODELS', 'true').lower() == 'true',
+            # LLM Provider settings
+            llm_provider=os.getenv('LLM_PROVIDER', 'ollama').lower(),
+            ollama_base_url=os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434'),
+            ollama_model=os.getenv('OLLAMA_MODEL', 'llama3.1:8b'),
+            ollama_timeout=int(os.getenv('OLLAMA_TIMEOUT', '30')),
             gemini_api_key=os.getenv('GEMINI_API_KEY'),
         )
 

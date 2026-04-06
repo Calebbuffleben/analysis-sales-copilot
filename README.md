@@ -1,132 +1,383 @@
-# Audio Pipeline Service (Python gRPC)
+# 🚀 Self-Hosted Deployment Guide
 
-Serviço Python que recebe streams de áudio via gRPC do backend NestJS.
+Complete setup guide for running the Meet Sales Co-pilot with **100% FREE LLM** using Ollama.
 
-## Estrutura
+## 📋 Prerequisites
 
-```
-python-service/
-├── Dockerfile              # Imagem Docker do serviço
-├── docker-compose.yml      # Orquestração Docker
-├── requirements.txt        # Dependências Python
-├── proto/
-│   └── audio_pipeline.proto # Definição do protocolo gRPC
-└── src/
-    ├── main.py             # Entry point da aplicação
-    ├── config/             # Configurações
-    │   ├── settings.py      # Configurações centralizadas
-    │   └── logging_config.py # Configuração de logging
-    ├── handlers/            # Handlers gRPC
-    │   └── audio_handler.py # Handler para streams de áudio
-    ├── services/            # Lógica de negócio
-    │   ├── audio_service.py # Serviço de processamento de áudio
-    │   └── stream_service.py # Gerenciamento de streams
-    ├── utils/               # Utilitários
-    │   └── proto_utils.py   # Utilitários para código proto
-    └── grpc_server/         # Servidor gRPC
-        └── server.py        # Setup e inicialização do servidor
-```
+- **Server**: Any machine with 8GB+ RAM (Hetzner, DigitalOcean, local server, etc.)
+- **Docker**: Installed and running
+- **Disk Space**: ~10GB (4GB for Ollama models + storage)
+- **Network**: Ports 50051, 9100, 11434 accessible (for Docker services)
 
-## Como executar
+**Minimum Server Specs:**
+- CPU: 2 cores (4 cores recommended)
+- RAM: 8GB (16GB recommended)
+- Disk: 50GB SSD
+- OS: Ubuntu 20.04+ / Debian 11+
 
-### Via Docker Compose
+**Recommended Server (Hetzner CX31):**
+- 2 vCPU, 8GB RAM, 160GB SSD
+- Cost: ~€8/month
+- Location: EU (GDPR compliant)
+
+---
+
+## 🚀 Quick Start (5 Minutes)
+
+### Step 1: Clone Repository
 
 ```bash
-cd python-service
+git clone <your-repo-url>
+cd meet/python-service
+```
 
-# Construir e iniciar o serviço COM LOGS NO TERMINAL (recomendado)
-docker-compose up --build
+### Step 2: Run Deployment Script
 
-# Ou em background (sem logs no terminal)
+```bash
+# First-time setup (downloads everything)
+./deploy.sh
+```
+
+The script will:
+1. ✅ Check Docker installation
+2. ✅ Create `.env` from template
+3. ✅ Start Ollama service
+4. ✅ Download AI model (~4.1GB, takes 2-5 minutes)
+5. ✅ Start python-service
+
+### Step 3: Verify Installation
+
+```bash
+# Check all services are running
+./deploy.sh --status
+
+# Test Ollama is working
+curl http://localhost:11434/api/tags
+
+# Test python-service metrics
+curl http://localhost:9100/metrics
+```
+
+Expected output: Services showing as "Up" and healthy.
+
+---
+
+## 📦 Manual Setup (If Preferred)
+
+If you prefer manual steps:
+
+```bash
+# 1. Copy environment template
+cp .env.example .env
+
+# 2. Start Ollama
+docker-compose up -d ollama
+
+# 3. Wait for Ollama to be ready (check with)
+curl http://localhost:11434/
+# Should return: "Ollama is running"
+
+# 4. Download model (Portuguese-optimized)
+docker exec ollama ollama pull qwen2.5:7b
+
+# 5. Start python-service
+docker-compose up -d
+
+# 6. Check logs
+docker-compose logs -f audio-pipeline-service
+```
+
+---
+
+## 🔧 Configuration
+
+### Environment Variables (.env)
+
+```bash
+# LLM Model Selection
+OLLAMA_MODEL=qwen2.5:7b  # Best for Portuguese
+
+# Backend Connection
+GRPC_FEEDBACK_URL=localhost:50052  # Your backend server
+
+# Logging
+LOG_LEVEL=INFO  # Use DEBUG for troubleshooting
+```
+
+### Available Models
+
+| Model | Size | PT-BR Quality | Speed | RAM | Command |
+|-------|------|--------------|-------|-----|---------|
+| **qwen2.5:7b** | 4.1GB | ⭐⭐⭐⭐⭐ | ~80ms/token | 6GB | `ollama pull qwen2.5:7b` |
+| llama3.1:8b | 4.7GB | ⭐⭐⭐⭐ | ~100ms/token | 7GB | `ollama pull llama3.1:8b` |
+| qwen2.5:3b | 2.3GB | ⭐⭐⭐⭐ | ~50ms/token | 4GB | `ollama pull qwen2.5:3b` |
+| mistral:7b | 4.1GB | ⭐⭐⭐ | ~90ms/token | 6GB | `ollama pull mistral:7b` |
+
+**Recommendation**: Use `qwen2.5:7b` for Portuguese sales calls.
+
+### Switching Models
+
+```bash
+# Download new model
+docker exec ollama ollama pull llama3.1:8b
+
+# Update .env
+sed -i 's/OLLAMA_MODEL=.*/OLLAMA_MODEL=llama3.1:8b/' .env
+
+# Restart service
+docker-compose restart audio-pipeline-service
+```
+
+---
+
+## 🔍 Monitoring & Maintenance
+
+### Check Service Status
+
+```bash
+./deploy.sh --status
+```
+
+### View Logs
+
+```bash
+# Real-time logs
+./deploy.sh --logs
+
+# Or manually
+docker-compose logs -f audio-pipeline-service
+docker-compose logs -f ollama
+```
+
+### Prometheus Metrics
+
+```bash
+# View metrics
+curl http://localhost:9100/metrics
+
+# Key metrics to monitor
+curl http://localhost:9100/metrics | grep -E "llm_|window_"
+```
+
+### Resource Usage
+
+```bash
+# Docker stats
+docker stats --no-stream
+
+# Disk usage (models take ~4GB each)
+docker exec ollama du -sh /root/.ollama
+
+# List downloaded models
+docker exec ollama ollama list
+```
+
+### Update Models
+
+```bash
+# Pull latest version
+docker exec ollama ollama pull qwen2.5:7b
+
+# Remove old models to free space
+docker exec ollama ollama rm llama3.1:8b
+```
+
+---
+
+## 🛠️ Troubleshooting
+
+### Service Won't Start
+
+```bash
+# Check Docker
+docker ps
+
+# Check logs
+docker-compose logs ollama
+docker-compose logs audio-pipeline-service
+
+# Common issue: Out of memory
+free -h  # Check available RAM
+```
+
+### Ollama Not Responding
+
+```bash
+# Restart Ollama
+docker-compose restart ollama
+
+# Test connection
+curl http://localhost:11434/api/tags
+
+# If still failing, recreate container
+docker-compose down ollama
+docker-compose up -d ollama
+```
+
+### Model Not Found
+
+```bash
+# Check available models
+docker exec ollama ollama list
+
+# Re-download if missing
+docker exec ollama ollama pull qwen2.5:7b
+```
+
+### High Latency
+
+```bash
+# Check if using too small model for RAM
+docker stats
+
+# If RAM-limited, use smaller model
+docker exec ollama ollama pull qwen2.5:3b
+sed -i 's/OLLAMA_MODEL=.*/OLLAMA_MODEL=qwen2.5:3b/' .env
+docker-compose restart audio-pipeline-service
+```
+
+### Connection to Backend Failing
+
+```bash
+# Test backend connectivity
+curl -v http://localhost:50052  # Should show gRPC
+
+# Update .env with correct URL
+echo "GRPC_FEEDBACK_URL=your-backend-ip:50052" >> .env
+docker-compose restart audio-pipeline-service
+```
+
+---
+
+## 🔄 Updating the Application
+
+```bash
+# Pull latest code
+git pull origin main
+
+# Rebuild and restart
+docker-compose down
 docker-compose up -d --build
 
-# Ver logs do serviço em background
-docker-compose logs -f
-
-# Parar o serviço
-docker-compose down
+# Verify
+./deploy.sh --status
 ```
 
-### Via Docker diretamente
+---
+
+## 📊 Performance Tuning
+
+### For CPU-Only Servers (No GPU)
+
+Use smaller models and increase timeouts:
 
 ```bash
-cd python-service
-
-# Construir a imagem
-docker build -t audio-pipeline-service .
-
-# Executar o container
-docker run -p 50051:50051 audio-pipeline-service
+# .env
+OLLAMA_MODEL=qwen2.5:3b  # Smaller, faster
+OLLAMA_TIMEOUT=60        # More time for CPU inference
 ```
 
-## Variáveis de Ambiente
+### For Servers with GPU
 
-- `GRPC_PORT`: Porta do servidor gRPC (padrão: 50051)
-- `GRPC_WORKERS`: Número de workers do ThreadPoolExecutor (padrão: 10)
-- `STT_PROCESS_WORKERS`: Paralelismo real do STT (padrão: `0`). `0` = um único processo Python com lock no modelo (comportamento legado). `N>=1` = `N` processos worker, cada um com seu próprio `WhisperModel` (`ProcessPoolExecutor`). Combine com `WINDOW_WORKER_THREADS` para throughput (ex.: 2 threads na fila de janelas + 2 processos STT).
-- `STORAGE_DIR`: Diretório para armazenar arquivos (padrão: /app/storage)
-- `LOG_LEVEL`: Nível de logging - DEBUG, INFO, WARNING, ERROR, CRITICAL (padrão: INFO)
-- `GRPC_FEEDBACK_URL`: Host:porta do ingress gRPC de feedback no backend (ex.: `localhost:50052` ou `*.railway.internal:50052`)
-- `AUDIO_BUFFER_WINDOW_SECONDS`, `AUDIO_BUFFER_MIN_WINDOW_SECONDS`, `AUDIO_BUFFER_MIN_INTERVAL_MS`: política de janela deslizante
-- `WHISPER_VAD_FILTER`: `true`/`false` — usa filtro VAD do faster-whisper (padrão: `true`). Desligar para testar hipótese de fala removida pelo VAD.
-- `WHISPER_EMPTY_DIAGNOSTIC_NO_VAD`: `true`/`false` — se `true`, quando o STT vier vazio com VAD ligado, agenda uma segunda passagem **só para log** sem VAD em thread separada (não bloqueia a próxima janela); o texto publicado não muda. Em produção, prefira `false`.
-- `WINDOW_QUEUE_MAX_SIZE`: tamanho máximo da fila de janelas prontas antes do STT (padrão: `8`)
-- `WINDOW_WORKER_THREADS`: threads que consomem a fila e rodam `TranscriptionPipelineService.process_window` (padrão: `2`)
-- `WINDOW_MAX_AGE_MS`: descarta janelas cuja idade (`now - window_end_ms`) exceda este valor ao enfileirar ou ao processar (padrão: `25000`)
-- `WINDOW_LOW_PRIORITY_SPEECH_RATIO_BELOW`: abaixo deste `speech_ratio` a janela é considerada baixa prioridade para eviction quando a fila está cheia (padrão: `0.02`)
-- `METRICS_ENABLED`: habilita endpoint Prometheus `/metrics` (padrão: `true`)
-- `METRICS_PORT`: porta do endpoint Prometheus `/metrics` (padrão: `9100`)
-- `PRELOAD_ML_MODELS`: `true`/`false` — se `true` (padrão), o processo carrega o Whisper e o modelo de embeddings (`sentence-transformers`) **antes** de subir o gRPC, evitando atraso de vários minutos na primeira janela (download HF + init). Em ambientes efêmeros sem cache de modelo, deixe `true`.
-- `WHISPER_LOW_ENERGY_DBFS`: limiar (dBFS); janelas com RMS médio abaixo disso **não** chamam o Whisper (atalho `low_energy_precheck`), só logs — reduz fila e CPU em silêncio absoluto.
-- `WHISPER_DEFAULT_LANGUAGE`: idioma opcional do Whisper (ex.: `pt`). Se definido, o serviço fixa esse idioma em todas as janelas; sem essa variável o serviço usa autodetecção e só reaproveita o último idioma bem-sucedido do stream como fallback de recuperação.
+Ollama auto-detects NVIDIA GPUs. Just ensure you have:
+- NVIDIA drivers installed
+- `nvidia-docker` or NVIDIA Container Toolkit
 
-## Endpoints
+```bash
+# Verify GPU is being used
+docker exec ollama nvidia-smi
+```
 
-- **gRPC**: `0.0.0.0:50051` (dentro do container)
-- **gRPC**: `localhost:50051` (do host)
-- **Metrics (Prometheus)**: `http://<host>:<METRICS_PORT>/metrics` (padrão: `9100`)
+### Memory Optimization
 
-## Logs
+If running low on RAM:
 
-O serviço loga:
-- Início de cada stream de áudio (inclui `sample_rate`, `channels`, bytes/s do contrato s16le)
-- `🔊 Window ready` — janela pronta para STT: duração, RMS, proporção de amostras “com fala”, pico (metadados incluem `speech_ratio` / `mean_rms_dbfs` para priorização)
-- `📥 Window dequeue` — worker retirou a janela da fila; inclui `queue_wait_ms`
-- `⏱️ Pipeline latency` — tempos aproximados de STT, análise e enqueue de publish por janela
-- `📝 Transcription completed` / `📝 STT empty` — resultado do Whisper com motivo aproximado quando vazio (`reason=`), idioma detectado e fallback usado
-- `📝 STT skip | reason=low_energy_precheck` — RMS abaixo do limiar; Whisper não foi chamado
-- `📝 STT recovered with language fallback` — janela que estava vazia na autodetecção mas recuperou texto ao repetir com idioma conhecido
-- `⏭️ Pipeline skip (empty transcript)` — pipeline interrompido antes da análise quando não há texto
-- `📨 Feedback published` — feedback enviado ao backend (inclui `transcript_chars` e janela em ms)
-- Estatísticas a cada 100 chunks
-- Finalização de streams
-- Erros
+```bash
+# docker-compose.yml - reduce Ollama memory
+deploy:
+  resources:
+    limits:
+      memory: 6G  # Instead of 8G
 
-### Smoke test (latência ponta a ponta)
+# Use smaller model
+OLLAMA_MODEL=qwen2.5:3b
+```
 
-Com backend e Python no ar, valide em logs que:
+---
 
-- `queue_wait_ms` em `📥 Window dequeue` permanece baixo (segundos, não minutos) sob carga moderada
-- `⏱️ Pipeline latency` mostra STT como maior fatia; `total_ms` não explode sem backlog
-- Janelas antigas geram `dropped` / não chegam a `📨 Feedback published` com `window_end_ms` muito anterior ao `ts` observado
-- Sob fila cheia, eviction favorece manter janelas com `speech_ratio` mais alto (ver metadados em `🔊 Window ready`)
+## 🚨 Production Checklist
 
-## Arquitetura
+Before going live:
 
-O serviço está organizado em módulos com responsabilidades bem definidas:
+- [ ] Server has 8GB+ RAM
+- [ ] Model downloaded and verified
+- [ ] `.env` configured with correct backend URL
+- [ ] Services showing as healthy
+- [ ] Prometheus metrics accessible
+- [ ] Logs being collected
+- [ ] Backup strategy for `.env` and storage
+- [ ] Firewall rules configured (only expose needed ports)
 
-- **config/**: Centraliza todas as configurações da aplicação
-- **handlers/**: Implementa os handlers gRPC que recebem requisições
-- **services/**: Contém a lógica de negócio (processamento de áudio, gerenciamento de streams)
-- **utils/**: Utilitários auxiliares (geração de código proto)
-- **grpc_server/**: Setup e inicialização do servidor gRPC
-- **main.py**: Entry point que orquestra a inicialização
+---
 
-## Próximos Passos
+## 📞 Common Commands
 
-O serviço atualmente apenas recebe e loga os chunks de áudio. Para implementar:
+```bash
+# Deploy (first time)
+./deploy.sh
 
-1. Salvar arquivos WAV em disco
-2. Enviar para serviço de transcrição
-3. Processar com modelos de IA
-4. Gerar feedback e eventos
+# Check status
+./deploy.sh --status
+
+# View logs
+./deploy.sh --logs
+
+# Restart services
+./deploy.sh --restart
+
+# Stop everything
+./deploy.sh --stop
+
+# Update to latest code
+git pull && ./deploy.sh --restart
+```
+
+---
+
+## 💡 Tips
+
+1. **Use `qwen2.5:7b`** for Portuguese - it's the best open-source model for PT-BR
+2. **Monitor RAM usage** - if consistently above 80%, switch to `qwen2.5:3b`
+3. **Keep models updated** - Ollama regularly improves model quality
+4. **Backup `.env`** - contains your configuration
+5. **Use DEBUG logging** temporarily when troubleshooting issues
+
+---
+
+## 🎯 Next Steps
+
+After deployment:
+
+1. ✅ Verify service is working with test call
+2. ✅ Set up Prometheus + Grafana (see `../prometheus-grafana-dashboard-setup.md`)
+3. ✅ Configure firewall rules (only expose necessary ports)
+4. ✅ Set up log rotation
+5. ✅ Monitor metrics for first few days to ensure stability
+
+---
+
+## 📚 Additional Resources
+
+- [Free LLM Setup Guide](free-llm-setup-ollama.md)
+- [Migration Guide](migration-gemini-to-ollama.md)
+- [LLM Improvements Summary](../docs/llm-improvements-summary.md)
+- [Ollama Documentation](https://ollama.ai/docs)
+
+---
+
+## 🆘 Need Help?
+
+1. Check logs: `./deploy.sh --logs`
+2. Check status: `./deploy.sh --status`
+3. Review troubleshooting section above
+4. Check Ollama docs: https://ollama.ai/docs
