@@ -2,6 +2,7 @@
 
 import json
 import logging
+import time
 from typing import Any, Dict
 
 import google.generativeai as genai
@@ -15,23 +16,61 @@ from .llm_state_validator import (
 
 logger = logging.getLogger(__name__)
 
+
+class QuotaExhaustedError(Exception):
+    """Raised when Gemini API quota is exhausted and we need to back off.
+    
+    This allows the fallback chain to distinguish between:
+    - Temporary errors (network, timeout) → retry
+    - Quota exhaustion (429) → use rule-based fallback immediately
+    """
+    pass
+
+
 class GeminiAnalyzer:
-    """Analyze transcription texts and manage conversation state using Gemini Flash."""
+    """Analyze transcription texts and manage conversation state using Gemini Flash.
+    
+    Features:
+    - Quota protection: backs off on 429 errors to avoid hammering the API
+    - Graceful degradation: returns empty fallback instead of crashing
+    - Response validation: ensures LLM output matches expected schema
+    """
 
     def __init__(self, api_key: str, model_name: str = 'gemini-2.0-flash'):
         if api_key:
             genai.configure(api_key=api_key)
         else:
             logger.warning("No Gemini API key provided. Analysis might fail if not injected properly.")
-        
+
         self.model = genai.GenerativeModel(model_name)
+        
+        # Quota protection: track consecutive 429 errors
+        self._consecutive_429_errors = 0
+        self._backoff_until_ms = 0  # Don't call API until this timestamp
 
     def analyze(self, text: str, conversation_state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Send the transcribed text and current conversational state to Gemini.
         Returns a dict containing 'direct_feedback' (str), 'confidence' (float),
         'feedback_type' (str or None), and 'conversation_state' (dict).
+        
+        Features quota protection:
+        - If in backoff period (429 errors), returns empty fallback immediately
+        - Resets backoff counter on successful calls
+        - Exponential backoff on consecutive 429 errors
         """
+        # Check if we're in a backoff period due to quota exhaustion
+        now_ms = int(time.time() * 1000)
+        if now_ms < self._backoff_until_ms:
+            remaining_sec = (self._backoff_until_ms - now_ms) / 1000
+            logger.warning(
+                f"Gemini API in backoff due to quota exhaustion. "
+                f"Remaining: {remaining_sec:.1f}s. Using rule-based fallback."
+            )
+            raise QuotaExhaustedError(
+                f"Gemini API quota exhausted. Backoff for {remaining_sec:.1f}s"
+            )
+        
         prompt = self._build_prompt(text, conversation_state)
 
         try:
@@ -51,6 +90,12 @@ class GeminiAnalyzer:
             raw_data = json.loads(response.text)
             validated = validate_llm_response(raw_data)
 
+            # SUCCESS: Reset backoff counter
+            if self._consecutive_429_errors > 0:
+                logger.info(f"Gemini API recovered after {self._consecutive_429_errors} consecutive 429 errors")
+                self._consecutive_429_errors = 0
+                self._backoff_until_ms = 0
+
             logger.debug(
                 f"LLM analysis validated: "
                 f"feedback='{validated.direct_feedback[:50] if validated.direct_feedback else 'none'}...', "
@@ -65,11 +110,46 @@ class GeminiAnalyzer:
                 'conversation_state': validated.estado.to_dict()
             }
 
-        except json.JSONDecodeError as e:
-            logger.error(f"Gemini returned invalid JSON: {e}")
-            return self._default_response(conversation_state)
         except Exception as e:
-            logger.exception(f"Error during Gemini analysis: {e}")
+            error_message = str(e)
+            
+            # Detect 429 quota exceeded errors
+            if '429' in error_message or 'ResourceExhausted' in error_message or 'quota' in error_message.lower():
+                self._consecutive_429_errors += 1
+                
+                # Extract retry delay from error message if available
+                retry_delay_sec = 60  # Default 60s backoff
+                if 'retry in' in error_message.lower():
+                    try:
+                        # Parse "retry in 14.87268893s"
+                        import re
+                        match = re.search(r'retry in ([\d.]+)s', error_message.lower())
+                        if match:
+                            retry_delay_sec = float(match.group(1))
+                    except:
+                        pass
+                
+                # Exponential backoff: base_delay * 2^(consecutive_errors - 1), max 5 minutes
+                exponential_delay = min(
+                    retry_delay_sec * (2 ** (self._consecutive_429_errors - 1)),
+                    300  # Max 5 minutes
+                )
+                
+                self._backoff_until_ms = now_ms + int(exponential_delay * 1000)
+                
+                logger.error(
+                    f"Gemini API quota exceeded (429). "
+                    f"Consecutive errors: {self._consecutive_429_errors}. "
+                    f"Backoff for {exponential_delay:.1f}s until {time.strftime('%H:%M:%S', time.localtime(self._backoff_until_ms / 1000))}"
+                )
+                
+                # Re-raise so the fallback chain can handle it
+                raise QuotaExhaustedError(
+                    f"Gemini API quota exceeded. Backoff for {exponential_delay:.1f}s"
+                ) from e
+            
+            # Non-429 error: log and return default
+            logger.exception(f"Error during Gemini analysis (non-quota): {e}")
             return self._default_response(conversation_state)
             
     def _default_response(self, state: Dict[str, Any]) -> Dict[str, Any]:

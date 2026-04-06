@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
 
-from .gemini_analyzer import GeminiAnalyzer
+from .gemini_analyzer import GeminiAnalyzer, QuotaExhaustedError
 from .llm_state_validator import ConversationState, validate_conversation_state
 from .llm_cache import SimpleTextCache
 from .llm_logger import log_llm_interaction, log_llm_state_change
@@ -197,6 +197,27 @@ class TextAnalysisService:
                         analysis_result = fallback_result.to_dict()
                     # else: keep the empty LLM result
                         
+            except QuotaExhaustedError as e:
+                # QUOTA EXHAUSTED: Use rule-based fallback immediately
+                llm_duration_ms = time.time() * 1000 - llm_start_ms
+                LLM_CALL_DURATION_MS.observe(llm_duration_ms)
+                LLM_CALL_ERRORS_TOTAL.inc()
+                LLM_FALLBACK_ACTIVATED_TOTAL.inc()
+                
+                logger.warning(f"Gemini API quota exhausted ({e}), using rule-based fallback")
+                try:
+                    fallback_result = analyze_text_fallback(chunk.text, current_state)
+                    analysis_result = fallback_result.to_dict()
+                    
+                    if fallback_result.feedback:
+                        logger.info(
+                            f"Fallback analysis succeeded (quota exhausted): {fallback_result.feedback[:50]}..."
+                        )
+                except Exception as fallback_error:
+                    # Even fallback failed - return safe empty result
+                    logger.error(f"Rule-based fallback also failed: {fallback_error}")
+                    analysis_result = self.gemini_analyzer._default_response(current_state)
+                    
             except Exception as e:
                 # LLM failed completely - use rule-based fallback
                 llm_duration_ms = time.time() * 1000 - llm_start_ms
