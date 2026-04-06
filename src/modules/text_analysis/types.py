@@ -24,6 +24,8 @@ class TextAnalysisResult:
 
     direct_feedback: str = ""
     conversation_state_json: str = "{}"
+    confidence: float = 0.5
+    feedback_type: Optional[str] = None
     samples_count: Optional[int] = None
     speech_count: Optional[int] = None
     mean_rms_dbfs: Optional[float] = None
@@ -33,8 +35,11 @@ class TextAnalysisResult:
         payload: Dict[str, Any] = {
             'direct_feedback': self.direct_feedback,
             'conversation_state_json': self.conversation_state_json,
+            'confidence': self.confidence,
         }
 
+        if self.feedback_type is not None:
+            payload['feedback_type'] = self.feedback_type
         if self.samples_count is not None:
             payload['samples_count'] = self.samples_count
         if self.speech_count is not None:

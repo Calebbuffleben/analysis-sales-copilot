@@ -5,3 +5,5 @@ faster-whisper>=1.0.0
 soundfile
 google-generativeai>=0.8.3
 prometheus-client
+pydantic>=2.0
+pytest>=7.0
