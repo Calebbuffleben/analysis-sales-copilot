@@ -29,7 +29,6 @@ logger = logging.getLogger(
     "audio_pipeline" if __name__ == "__main__" else __name__,
 )
 
-
 def main():
     """Main entry point for the application."""
     try:
