@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 class GeminiAnalyzer:
     """Analyze transcription texts and manage conversation state using Gemini Flash."""
 
-    def __init__(self, api_key: str, model_name: str = 'gemini-1.5-flash'):
+    def __init__(self, api_key: str, model_name: str = 'gemini-2.0-flash'):
         if api_key:
             genai.configure(api_key=api_key)
         else:
