@@ -213,7 +213,11 @@ def create_server(config: Settings) -> grpc.Server:
         config.whisper_low_energy_dbfs,
         config.whisper_default_language,
     )
-    logger.info('Gemini LLM Analyzer enabled')
+    logger.info(
+        'LLM Provider: %s (model: %s)',
+        config.llm_provider.upper(),
+        config.ollama_model if config.llm_provider == 'ollama' else 'gemini-2.0-flash',
+    )
     logger.info(
         'Window queue | WINDOW_QUEUE_MAX_SIZE=%s | WINDOW_WORKER_THREADS=%s | '
         'WINDOW_MAX_AGE_MS=%s | WINDOW_LOW_PRIORITY_SPEECH_RATIO_BELOW=%s',

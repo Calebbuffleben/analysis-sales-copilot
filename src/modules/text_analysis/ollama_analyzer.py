@@ -103,10 +103,11 @@ class OllamaAnalyzer:
                 json={
                     "model": self.model,
                     "prompt": prompt,
-                    "stream": False,  # We want complete response
+                    "stream": False,
                     "options": {
                         "temperature": 0.2,
-                        "num_predict": 500,  # Max tokens to generate
+                        "num_predict": 200,  # Reduced from 500 - we only need JSON
+                        "num_ctx": 2048,     # Reduced from default 4096 - faster on CPU
                     }
                 },
                 timeout=self.timeout,
@@ -183,43 +184,31 @@ class OllamaAnalyzer:
         }
 
     def _build_prompt(self, text: str, state: Dict[str, Any]) -> str:
-        """Build prompt optimized for local models (smaller context = faster).
+        """Build optimized prompt for local Ollama models.
         
-        This prompt is simpler than Gemini's to work well with 7-8B parameter models.
+        Returns precise, actionable feedback in Portuguese for sales calls.
         """
-        state_str = json.dumps(state, ensure_ascii=False, indent=2)
-        return f"""You are an experienced sales assistant acting as a co-pilot for a sales representative during a video call.
+        state_str = json.dumps(state, ensure_ascii=False)
+        return f"""Você é um assistente de vendas experiente analisando uma conversa em tempo real.
 
-Analyze this sales conversation excerpt and provide tactical feedback.
+Analise o trecho e dê feedback TÁTICO e ESPECÍFICO em PORTUGUÊS para o vendedor.
 
-CURRENT CONVERSATION STATE:
+ESTADO ATUAL:
 {state_str}
 
-NEW EXCERPT:
+TRECHO DA CONVERSA:
 "{text}"
 
-Respond ONLY with a valid JSON object in this exact format:
-{{
-  "feedback": "Short tactical feedback (1-2 sentences) or null if no intervention needed",
-  "confidence": 0.85,
-  "feedback_type": "objection|opportunity|rapport|closing|clarification|risk|null",
-  "estado": {{
-    "interesse": "baixo|medio|alto",
-    "resistencia": "baixa|media|alta",
-    "objecoes_detectadas": ["preco", "concorrente", "tempo", "confianca", "funcionalidade", "contrato", "implementacao", "roi"],
-    "engajamento": "baixo|medio|alto"
-  }}
-}}
+Regras:
+- Responda SOMENTE em português
+- Feedback deve ser ação concreta e específica (não genérica)
+- Máximo 1 frase curta
+- Se não houver sinal claro de objeção ou oportunidade, responda null
+- Confiança: 0.9-1.0 (sinal explícito), 0.7-0.9 (sinal claro), 0.5-0.7 (moderado), <0.5 (incerto)
 
-Valid objection categories: preco, concorrente, tempo, confianca, funcionalidade, contrato, implementacao, roi
-Valid feedback types: objection, opportunity, rapport, closing, clarification, risk
-
-Rules:
-- Only provide feedback when truly necessary (clear objection or buying signal)
-- Be specific and actionable
-- Keep feedback to 1-2 sentences maximum
-- Self-evaluate confidence: 0.9-1.0 (very clear), 0.7-0.9 (clear), 0.5-0.7 (moderate), <0.5 (uncertain - use null feedback)
-- Response MUST be valid JSON only"""
+Responda APENAS JSON válido:
+{{"feedback":"conselho tático em português ou null","confidence":0.85,"feedback_type":"objection|opportunity|rapport|closing|clarification|risk|null","estado":{{"interesse":"baixo|medio|alto","resistencia":"baixa|media|alta","objecoes_detectadas":["preco","concorrente","tempo","confianca","funcionalidade","contrato","implementacao","roi"],"engajamento":"baixo|medio|alto"}}}}
+"""
 
 
 class OllamaConnectionError(Exception):
