@@ -1,10 +1,13 @@
 """Service for processing audio chunks."""
 
 import logging
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from ..modules.audio_buffer.service import AudioBufferService
 from .stream_service import StreamService, StreamStats
+
+if TYPE_CHECKING:
+    from ..modules.text_analysis.text_analysis_service import TextAnalysisService
 
 logger = logging.getLogger(__name__)
 
@@ -16,19 +19,19 @@ class AudioService:
         self,
         stream_service: Optional[StreamService] = None,
         audio_buffer_service: Optional[AudioBufferService] = None,
+        text_analysis_service: Optional['TextAnalysisService'] = None,
     ):
         """
         Initialize the audio service.
 
         Args:
             stream_service: Optional StreamService instance. Creates new one if not provided.
+            audio_buffer_service: Optional AudioBufferService instance.
+            text_analysis_service: Optional TextAnalysisService for cleanup on meeting end.
         """
         self.stream_service = stream_service or StreamService()
         self.audio_buffer_service = audio_buffer_service
-        # TODO: Inject here, via dependency injection or factory:
-        # - SlidingWindowWorker: já encapsulado dentro de AudioBufferService.
-        # - TranscriptionPipelineService: serviço de nível mais alto que registra
-        #   um callback no SlidingWindowWorker e orquestra STT + análise de texto.
+        self.text_analysis_service = text_analysis_service
 
     def start_stream(
         self,
@@ -126,6 +129,9 @@ class AudioService:
         """
         Finalize an audio stream.
 
+        FIX #3: Automatically clear conversation state when meeting ends.
+        This prevents stale state from persisting for 30min after meeting ends.
+
         Args:
             meeting_id: Meeting identifier
             participant_id: Participant identifier
@@ -138,8 +144,18 @@ class AudioService:
         if self.audio_buffer_service:
             self.audio_buffer_service.end_stream(stream_key)
 
-        return self.stream_service.end_stream(
+        stats = self.stream_service.end_stream(
             meeting_id=meeting_id,
             participant_id=participant_id,
             track=track
         )
+
+        # FIX #3: Clear conversation state when stream ends
+        if self.text_analysis_service:
+            cleared = self.text_analysis_service.clear_meeting_state(meeting_id)
+            if cleared > 0:
+                logger.info(
+                    f"🧹 Cleared {cleared} conversation states for meeting {meeting_id}"
+                )
+
+        return stats

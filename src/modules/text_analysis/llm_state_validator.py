@@ -151,16 +151,39 @@ class LLMAnalysisResult(BaseModel):
         return json.dumps(self.estado.to_dict(), ensure_ascii=False)
 
 
-def validate_conversation_state(raw_state: dict) -> ConversationState:
+def validate_conversation_state(
+    raw_state: dict,
+    fallback_state: ConversationState | None = None,
+) -> ConversationState:
     """Validate and normalize a raw conversation state dict from LLM.
-    
-    Returns a valid ConversationState, falling back to defaults if invalid.
+
+    FIX #1: Instead of silently resetting to defaults on validation failure,
+    we preserve the existing state and log the error for debugging.
+
+    Args:
+        raw_state: Raw state dict from LLM response
+        fallback_state: Existing state to preserve if validation fails (prevents silent reset)
+
+    Returns:
+        Validated ConversationState, preserving existing state if validation fails
     """
+    if fallback_state is None:
+        fallback_state = ConversationState.default_state()
+
+    if not raw_state:
+        return fallback_state
+
     try:
         return ConversationState(**raw_state)
-    except Exception:
-        # Return safe defaults instead of crashing
-        return ConversationState.default_state()
+    except Exception as e:
+        # FIX: Log which field failed validation for debugging
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            f"LLM state validation failed, preserving existing state. "
+            f"Error: {e}. Invalid state: {raw_state}"
+        )
+        return fallback_state
 
 
 def validate_llm_response(raw_response: dict) -> LLMAnalysisResult:

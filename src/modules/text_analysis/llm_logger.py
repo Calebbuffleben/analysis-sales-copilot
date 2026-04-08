@@ -70,33 +70,35 @@ def log_llm_interaction(
 
 
 def log_llm_state_change(
+    context_key: str,
     meeting_id: str,
     participant_id: str,
     old_state: Dict[str, Any],
     new_state: Dict[str, Any],
 ) -> None:
     """Log when conversation state changes significantly.
-    
+
     Only logs when there are meaningful changes (not every micro-adjustment).
+    FIX #2: Now includes context_key for better traceability.
     """
     # Detect significant changes
     significant_changes = []
-    
+
     if old_state.get('interesse') != new_state.get('interesse'):
         significant_changes.append(
             f"interesse: {old_state.get('interesse')} -> {new_state.get('interesse')}"
         )
-    
+
     if old_state.get('resistencia') != new_state.get('resistencia'):
         significant_changes.append(
             f"resistencia: {old_state.get('resistencia')} -> {new_state.get('resistencia')}"
         )
-    
+
     if old_state.get('engajamento') != new_state.get('engajamento'):
         significant_changes.append(
             f"engajamento: {old_state.get('engajamento')} -> {new_state.get('engajamento')}"
         )
-    
+
     old_objections = set(old_state.get('objecoes_detectadas', []))
     new_objections = set(new_state.get('objecoes_detectadas', []))
     if old_objections != new_objections:
@@ -106,15 +108,16 @@ def log_llm_state_change(
             significant_changes.append(f"new objections: {', '.join(added)}")
         if removed:
             significant_changes.append(f"resolved objections: {', '.join(removed)}")
-    
+
     # Only log if there are significant changes
     if significant_changes:
         trace_id = make_llm_trace_id(meeting_id, participant_id, int(time.time() * 1000))
-        
+
         logger.info(
             json.dumps({
                 'stage': 'llm.state_change',
                 'trace_id': trace_id,
+                'context_key': context_key,
                 'meeting_id': meeting_id,
                 'participant_id': participant_id,
                 'changes': significant_changes,

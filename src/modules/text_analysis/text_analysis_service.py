@@ -78,7 +78,11 @@ class TextAnalysisService:
         self._lock = threading.RLock()
         self._state: Dict[str, Dict[str, Any]] = {}
         self._state_metadata: Dict[str, dict] = {}  # Tracks last_access, created_at
-        
+
+        # FIX #4: Shared meeting-level state for cross-participant context
+        # This allows objections detected in participant A to appear in participant B's state
+        self._meeting_state: Dict[str, Dict[str, Any]] = {}  # meeting_id -> shared state
+
         # LLM response cache (reduces API calls by 40-60%)
         self._llm_cache = SimpleTextCache(
             max_size=500,
@@ -93,6 +97,48 @@ class TextAnalysisService:
     def _get_context_key(self, chunk: TranscriptionChunk) -> str:
         """Generate a unique conversational context key."""
         return f"{chunk.meeting_id}:{chunk.participant_id}"
+
+    def _merge_states(self, participant_state: Dict[str, Any], meeting_state: Dict[str, Any]) -> Dict[str, Any]:
+        """FIX #4: Merge participant state with shared meeting state.
+
+        The merged state is sent to the LLM prompt. This ensures that objections
+        detected from any participant are visible to the LLM.
+
+        Priority: participant_state > meeting_state (participant is more specific)
+        """
+        merged = meeting_state.copy()
+        merged.update(participant_state)
+
+        # Merge objections (union of both)
+        participant_objections = set(participant_state.get('objecoes_detectadas', []))
+        meeting_objections = set(meeting_state.get('objecoes_detectadas', []))
+        merged['objecoes_detectadas'] = list(participant_objections | meeting_objections)
+
+        return merged
+
+    def _update_meeting_state(self, meeting_id: str, new_state: Dict[str, Any]) -> None:
+        """FIX #4: Update shared meeting state with new state."""
+        with self._lock:
+            if meeting_id not in self._meeting_state:
+                self._meeting_state[meeting_id] = new_state
+                return
+
+            current = self._meeting_state[meeting_id]
+
+            # Update fields with more severe values
+            severity_order = {'baixa': 0, 'baixo': 0, 'media': 1, 'medio': 1, 'alta': 2, 'alto': 2}
+
+            for field in ['interesse', 'resistencia', 'engajamento']:
+                new_val = new_state.get(field, current.get(field))
+                if new_val and severity_order.get(new_val, 0) >= severity_order.get(current.get(field, ''), 0):
+                    current[field] = new_val
+
+            # Merge objections (union)
+            current_objections = set(current.get('objecoes_detectadas', []))
+            new_objections = set(new_state.get('objecoes_detectadas', []))
+            current['objecoes_detectadas'] = list(current_objections | new_objections)
+
+            self._meeting_state[meeting_id] = current
 
     def _cleanup_expired_states(self) -> int:
         """Remove expired states based on TTL.
@@ -156,6 +202,43 @@ class TextAnalysisService:
         LLM_CACHE_HIT_RATIO.set(stats['hit_rate'])
         return stats
 
+    def clear_meeting_state(self, meeting_id: str) -> int:
+        """FIX #3: Clear all state for a meeting when it ends.
+
+        This prevents stale state from persisting for 30min after meeting ends.
+
+        Args:
+            meeting_id: Meeting identifier to clear
+
+        Returns:
+            Number of states cleared
+        """
+        with self._lock:
+            keys_to_remove = [
+                key for key in self._state
+                if key.startswith(f"{meeting_id}:")
+            ]
+            for key in keys_to_remove:
+                self._state.pop(key, None)
+                self._state_metadata.pop(key, None)
+
+            # Also clear shared meeting state
+            self._meeting_state.pop(meeting_id, None)
+
+        if keys_to_remove:
+            logger.info(
+                f"Cleared {len(keys_to_remove)} conversation states for meeting {meeting_id}"
+            )
+        return len(keys_to_remove)
+
+    def get_meeting_state_keys(self, meeting_id: str) -> list[str]:
+        """Get all state keys for a meeting (for debugging)."""
+        with self._lock:
+            return [
+                key for key in self._state
+                if key.startswith(f"{meeting_id}:")
+            ]
+
     def analyze(
         self,
         chunk: TranscriptionChunk,
@@ -176,8 +259,24 @@ class TextAnalysisService:
                 self._state[context_key] = ConversationState.default_state().to_dict()
                 logger.info(f"Initialized new conversation state: {context_key}")
 
+                # FIX #4: Initialize shared meeting state if first participant
+                if chunk.meeting_id not in self._meeting_state:
+                    self._meeting_state[chunk.meeting_id] = {
+                        "interesse": "medio",
+                        "resistencia": "baixa",
+                        "objecoes_detectadas": [],
+                        "engajamento": "medio",
+                        "participant_count": 0,
+                    }
+                    logger.info(f"Initialized shared meeting state: {chunk.meeting_id}")
+
             current_state = self._state[context_key]
+            meeting_state = self._meeting_state.get(chunk.meeting_id, {})
             self._touch_state(context_key)
+
+        # FIX #4: Merge participant state with shared meeting state
+        # This allows objections from participant A to appear in participant B's context
+        merged_state = self._merge_states(current_state, meeting_state)
 
         # Check cache first (before calling LLM)
         cached_response = self._llm_cache.get(chunk.text)
@@ -287,11 +386,28 @@ class TextAnalysisService:
             LLM_FEEDBACK_EMITTED_TOTAL.inc()
 
         # Validate and update cached state
+        # FIX #1: Pass current_state as fallback to prevent silent reset
+        old_state = current_state.copy()
         new_state = validate_conversation_state(
-            analysis_result.get('conversation_state', current_state)
+            analysis_result.get('conversation_state', current_state),
+            fallback_state=ConversationState(**current_state),  # Preserve existing state
         )
         with self._lock:
             self._state[context_key] = new_state.to_dict()
+            # FIX #4: Also update shared meeting state
+            self._update_meeting_state(chunk.meeting_id, new_state.to_dict())
+
+        # FIX #2: Log state changes for debugging
+        try:
+            log_llm_state_change(
+                context_key=context_key,
+                meeting_id=chunk.meeting_id,
+                participant_id=chunk.participant_id,
+                old_state=old_state,
+                new_state=new_state.to_dict(),
+            )
+        except Exception as log_error:
+            logger.debug(f"Failed to log state change: {log_error}")
 
         # Return the enhanced TextAnalysisResult
         result = TextAnalysisResult(

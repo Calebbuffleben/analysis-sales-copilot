@@ -193,7 +193,12 @@ def create_server(config: Settings) -> grpc.Server:
     audio_buffer_service.register_window_callback(
         lambda sk, pcm, meta: ready_window_dispatcher.enqueue(sk, pcm, meta),
     )
-    audio_service = AudioService(audio_buffer_service=audio_buffer_service)
+
+    # FIX #3: Wire text_analysis_service into AudioService for automatic state cleanup
+    audio_service = AudioService(
+        audio_buffer_service=audio_buffer_service,
+        text_analysis_service=text_analysis_service,
+    )
     servicer = AudioPipelineServicer(audio_service)
 
     # Register servicer
