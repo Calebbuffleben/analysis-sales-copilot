@@ -11,6 +11,13 @@ INTEREST_LEVEL = Literal["baixo", "medio", "alto"]
 RESISTANCE_LEVEL = Literal["baixa", "media", "alta"]
 ENGAGEMENT_LEVEL = Literal["baixo", "medio", "alto"]
 
+FASE_SPIN = Literal["neutro", "situacao", "problema", "implicacao", "necessidade"]
+
+_VALID_FASE_SPIN = frozenset({"neutro", "situacao", "problema", "implicacao", "necessidade"})
+
+# Max length for suggested SPIN question (prompt / UI safety)
+_PROXIMA_PERGUNTA_SPIN_MAX_LEN = 500
+
 # Predefined objection categories (prevents LLM from inventing random categories)
 VALID_OBJECTION_CATEGORIES = frozenset({
     "preco",           # Price/cost concerns
@@ -47,7 +54,45 @@ class ConversationState(BaseModel):
         default="medio",
         description="Client engagement level: baixo, medio, or alto"
     )
-    
+    fase_spin: FASE_SPIN = Field(
+        default="neutro",
+        description="SPIN phase: neutro until clearly detected; then situacao/problema/implicacao/necessidade",
+    )
+    proxima_pergunta_spin: str = Field(
+        default="",
+        description="Suggested next SPIN question when phase is known; empty when neutro or not applicable",
+    )
+    alerta_risco_spin: bool = Field(
+        default=False,
+        description="True when seller skips SPIN steps (e.g. solution before problem/implication)",
+    )
+
+    @field_validator("fase_spin", mode="before")
+    @classmethod
+    def normalize_fase_spin(cls, v) -> str:
+        """Coerce invalid or missing values to neutro."""
+        if v is None:
+            return "neutro"
+        s = str(v).lower().strip()
+        if s in _VALID_FASE_SPIN:
+            return s
+        return "neutro"
+
+    @field_validator("proxima_pergunta_spin")
+    @classmethod
+    def truncate_proxima_pergunta(cls, v: str) -> str:
+        s = (v or "").strip()
+        if len(s) > _PROXIMA_PERGUNTA_SPIN_MAX_LEN:
+            return s[:_PROXIMA_PERGUNTA_SPIN_MAX_LEN]
+        return s
+
+    @field_validator("alerta_risco_spin", mode="before")
+    @classmethod
+    def coerce_alerta_risco(cls, v) -> bool:
+        if v is True or v == 1 or str(v).lower() in ("true", "1", "yes"):
+            return True
+        return False
+
     @field_validator("objecoes_detectadas")
     @classmethod
     def validate_objections(cls, v: list[str]) -> list[str]:
@@ -87,6 +132,9 @@ class ConversationState(BaseModel):
             "resistencia": self.resistencia,
             "objecoes_detectadas": self.objecoes_detectadas,
             "engajamento": self.engajamento,
+            "fase_spin": self.fase_spin,
+            "proxima_pergunta_spin": self.proxima_pergunta_spin,
+            "alerta_risco_spin": self.alerta_risco_spin,
         }
     
     @classmethod

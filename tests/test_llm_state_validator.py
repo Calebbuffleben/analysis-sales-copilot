@@ -1,7 +1,7 @@
 """Unit tests for LLM state validation and conversation state management."""
 
 import pytest
-from .llm_state_validator import (
+from src.modules.text_analysis.llm_state_validator import (
     ConversationState,
     LLMAnalysisResult,
     validate_conversation_state,
@@ -21,6 +21,9 @@ class TestConversationState:
         assert state.resistencia == "baixa"
         assert state.objecoes_detectadas == []
         assert state.engajamento == "medio"
+        assert state.fase_spin == "neutro"
+        assert state.proxima_pergunta_spin == ""
+        assert state.alerta_risco_spin is False
 
     def test_valid_objections_are_kept(self):
         """Test that valid objection categories are preserved."""
@@ -52,6 +55,11 @@ class TestConversationState:
         assert "concorrente" in state.objecoes_detectadas
         assert "tempo" in state.objecoes_detectadas
 
+    def test_invalid_fase_spin_becomes_neutro(self):
+        """Unknown fase_spin values are coerced to neutro."""
+        state = ConversationState(fase_spin="invalid_phase")
+        assert state.fase_spin == "neutro"
+
     def test_to_dict_serialization(self):
         """Test state to dict conversion."""
         state = ConversationState(
@@ -67,6 +75,9 @@ class TestConversationState:
         assert result["resistencia"] == "media"
         assert result["objecoes_detectadas"] == ["preco"]
         assert result["engajamento"] == "alto"
+        assert result["fase_spin"] == "neutro"
+        assert result["proxima_pergunta_spin"] == ""
+        assert result["alerta_risco_spin"] is False
 
     def test_validate_conversation_state_with_valid_dict(self):
         """Test validation with valid dict input."""
@@ -74,7 +85,10 @@ class TestConversationState:
             "interesse": "alto",
             "resistencia": "alta",
             "objecoes_detectadas": ["preco", "concorrente"],
-            "engajamento": "medio"
+            "engajamento": "medio",
+            "fase_spin": "problema",
+            "proxima_pergunta_spin": "Quanto isso custa hoje para vocês?",
+            "alerta_risco_spin": False,
         }
         
         state = validate_conversation_state(raw_state)
@@ -82,6 +96,8 @@ class TestConversationState:
         assert state.interesse == "alto"
         assert state.resistencia == "alta"
         assert len(state.objecoes_detectadas) == 2
+        assert state.fase_spin == "problema"
+        assert "custa" in state.proxima_pergunta_spin
 
     def test_validate_conversation_state_with_invalid_dict(self):
         """Test validation with invalid dict falls back to defaults."""
@@ -123,12 +139,9 @@ class TestLLMAnalysisResult:
         assert result.direct_feedback == ""
 
     def test_confidence_bounds(self):
-        """Test confidence is clamped to 0.0-1.0."""
-        result = LLMAnalysisResult(confidence=1.5)
-        assert result.confidence == 1.0
-        
-        result = LLMAnalysisResult(confidence=-0.5)
-        assert result.confidence == 0.0
+        """Test confidence must stay within 0.0-1.0 (Pydantic field constraints)."""
+        assert LLMAnalysisResult(confidence=1.0).confidence == 1.0
+        assert LLMAnalysisResult(confidence=0.0).confidence == 0.0
 
     def test_feedback_type_validation(self):
         """Test feedback_type validation."""

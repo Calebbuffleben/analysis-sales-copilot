@@ -1,44 +1,6 @@
-# Self-Hosted Deployment with Ollama (100% FREE LLM)
-# 
-# Quick Start:
-# 1. docker-compose up -d ollama
-# 2. docker exec -it ollama ollama pull qwen2.5:7b
-# 3. docker-compose up -d
-#
-# See docs/free-llm-setup-ollama.md for full guide
+# Self-Hosted Deployment (Gemini)
 
 services:
-  # ==========================================
-  # Ollama - Local LLM Inference (FREE)
-  # ==========================================
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    restart: unless-stopped
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    environment:
-      # Handle 2 concurrent requests
-      OLLAMA_NUM_PARALLEL: "2"
-      # Keep only 1 model loaded to save RAM
-      OLLAMA_MAX_LOADED_MODELS: "1"
-    deploy:
-      resources:
-        limits:
-          memory: 8G
-        reservations:
-          memory: 4G
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-    networks:
-      - meet-network
-
   # ==========================================
   # Python Service - Audio Pipeline + LLM Analysis
   # ==========================================
@@ -50,46 +12,12 @@ services:
     ports:
       - "50051:50051"  # gRPC audio pipeline
       - "9100:9100"    # Prometheus metrics
-    environment:
-      # gRPC Audio Pipeline
-      - GRPC_PORT=50051
-      - GRPC_FEEDBACK_URL=${GRPC_FEEDBACK_URL:-localhost:50052}
-      
-      # Prometheus Metrics
-      - METRICS_PORT=9100
-      - METRICS_ENABLED=true
-      
-      # ==========================================
-      # LLM Configuration - Ollama (FREE)
-      # ==========================================
-      - LLM_PROVIDER=ollama
-      - OLLAMA_BASE_URL=http://ollama:11434
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:7b}
-      - OLLAMA_TIMEOUT=30
-      
-      # Transcription (faster-whisper)
-      - TRANSCRIPTION_MODEL_SIZE=small
-      - TRANSCRIPTION_DEVICE=cpu
-      - WHISPER_VAD_FILTER=true
-      - WHISPER_DEFAULT_LANGUAGE=pt
-      
-      # Window processing
-      - WINDOW_QUEUE_MAX_SIZE=8
-      - WINDOW_WORKER_THREADS=2
-      - WINDOW_MAX_AGE_MS=25000
-      
-      # Logging
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      
-      # Optional: Enable detailed feedback trace logs
-      # - FEEDBACK_TRACE_DEBUG=true
+    env_file:
+      - .env
     volumes:
       # Persistent storage for audio files
       - ./storage:/app/storage
     restart: unless-stopped
-    depends_on:
-      ollama:
-        condition: service_healthy
     networks:
       - meet-network
     # Health check for the service
@@ -99,11 +27,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s  # Give time for ML models to load
-
-# Named volume for Ollama models (persists across restarts)
-volumes:
-  ollama_data:
-    driver: local
 
 # Shared network for inter-service communication
 networks:

@@ -19,6 +19,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copiar código fonte
 COPY proto/ ./proto/
 COPY src/ ./src/
+# Smoke test script (same as host: python test_gemini_verify.py)
+COPY test_gemini_verify.py .
 
 # Gerar código gRPC a partir do .proto
 RUN python -m grpc_tools.protoc \

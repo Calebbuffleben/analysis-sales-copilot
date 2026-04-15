@@ -62,6 +62,7 @@ class Settings:
     
     # Gemini settings (if using Google API)
     gemini_api_key: Optional[str] = None
+    gemini_model: str = 'gemini-2.5-flash'
 
     @classmethod
     def from_env(cls) -> 'Settings':
@@ -142,6 +143,7 @@ class Settings:
             ollama_model=os.getenv('OLLAMA_MODEL', 'llama3.1:8b'),
             ollama_timeout=int(os.getenv('OLLAMA_TIMEOUT', '30')),
             gemini_api_key=os.getenv('GEMINI_API_KEY'),
+            gemini_model=os.getenv('GEMINI_MODEL', 'gemini-2.5-flash'),
         )
 
     @staticmethod

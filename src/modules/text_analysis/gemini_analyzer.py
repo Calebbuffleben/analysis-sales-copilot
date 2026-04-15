@@ -36,7 +36,7 @@ class GeminiAnalyzer:
     - Response validation: ensures LLM output matches expected schema
     """
 
-    def __init__(self, api_key: str, model_name: str = 'gemini-2.0-flash'):
+    def __init__(self, api_key: str, model_name: str = 'gemini-2.5-flash'):
         if api_key:
             genai.configure(api_key=api_key)
         else:
@@ -167,11 +167,13 @@ class GeminiAnalyzer:
         Uses few-shot learning examples to improve response consistency and quality.
         """
         state_str = json.dumps(state, ensure_ascii=False, indent=2)
-        return f"""Você é um assistente de vendas experiente agindo como um "co-piloto" para um representante comercial durante uma videochamada.
+        return f"""Você é um motor de IA de baixa latência agindo como um "co-piloto" tático para um representante comercial durante uma videochamada. Sua função é analisar trechos de conversas e fornecer feedbacks concisos e acionáveis.
 
-OBJETIVO: Analisar trechos de conversas de vendas em tempo real e fornecer feedback tático conciso para o vendedor.
+OBJETIVO: Analisar conversas de vendas em tempo real e fornecer feedback tático conciso para o vendedor.
 
-# EXEMPLOS DE REFERÊNCIA
+PRIORIDADE: Na maior parte dos trechos, concentre-se apenas em sinais táticos: objeção, oportunidade, rapport, fechamento, ou nenhuma intervenção (`feedback`: null). O texto do `feedback` não deve nomear metodologias de venda nem rotular "fases" de descoberta, **salvo** quando `fase_spin` no estado já não for `neutro` ou quando `alerta_risco_spin` for aplicável (campos opcionais descritos mais abaixo).
+
+# EXEMPLOS DE REFERÊNCIA (caminho principal — maioria dos trechos)
 
 Exemplo 1 - Objeção de preço:
 Trecho: "Achei caro comparado ao concorrente X"
@@ -184,7 +186,10 @@ Resposta esperada:
     "interesse": "medio",
     "resistencia": "alta",
     "objecoes_detectadas": ["preco", "concorrente"],
-    "engajamento": "medio"
+    "engajamento": "medio",
+    "fase_spin": "neutro",
+    "proxima_pergunta_spin": "",
+    "alerta_risco_spin": false
   }}
 }}
 
@@ -199,7 +204,10 @@ Resposta esperada:
     "interesse": "alto",
     "resistencia": "baixa",
     "objecoes_detectadas": [],
-    "engajamento": "alto"
+    "engajamento": "alto",
+    "fase_spin": "neutro",
+    "proxima_pergunta_spin": "",
+    "alerta_risco_spin": false
   }}
 }}
 
@@ -214,7 +222,10 @@ Resposta esperada:
     "interesse": "medio",
     "resistencia": "baixa",
     "objecoes_detectadas": [],
-    "engajamento": "medio"
+    "engajamento": "medio",
+    "fase_spin": "neutro",
+    "proxima_pergunta_spin": "",
+    "alerta_risco_spin": false
   }}
 }}
 
@@ -229,7 +240,53 @@ Resposta esperada:
     "interesse": "medio",
     "resistencia": "alta",
     "objecoes_detectadas": ["tempo"],
-    "engajamento": "baixo"
+    "engajamento": "baixo",
+    "fase_spin": "neutro",
+    "proxima_pergunta_spin": "",
+    "alerta_risco_spin": false
+  }}
+}}
+
+# Campos opcionais no estado (referência SPIN — uso secundário)
+
+Só preencha estes campos quando o trecho (e o estado atual) derem suporte; na dúvida mantenha `fase_spin`: **"neutro"** e `proxima_pergunta_spin` vazio. Referência rápida das fases: **situacao** (contexto) → **problema** (dor) → **implicacao** (impacto se não resolver) → **necessidade** (valor da solução). Preserve `fase_spin` entre trechos salvo evidência nova clara. `alerta_risco_spin`: true só se o vendedor **pular** etapas (ex.: proposta antes de dor/impacto claros) — aí use `feedback_type`: **"risk"**. `proxima_pergunta_spin`: só se `fase_spin` não for neutro e fizer sentido.
+
+# Exemplos adicionais (só quando o trecho justificar — não é o padrão)
+
+Exemplo 5 - Dor explícita do cliente (fase problema + pergunta sugerida):
+Trecho do cliente: "Hoje a equipe perde um dia inteiro fechando a folha manualmente."
+Resposta esperada:
+{{
+  "feedback": "Cliente descreveu um gargalo operacional — explore impacto (tempo/custo) antes de apresentar solução",
+  "confidence": 0.82,
+  "feedback_type": "opportunity",
+  "estado": {{
+    "interesse": "medio",
+    "resistencia": "baixa",
+    "objecoes_detectadas": [],
+    "engajamento": "medio",
+    "fase_spin": "problema",
+    "proxima_pergunta_spin": "Quanto isso custa em horas ou reais por mês para vocês?",
+    "alerta_risco_spin": false
+  }}
+}}
+
+Exemplo 6 - Risco: solução cedo demais (`feedback_type` risk):
+Estado atual já tinha: "fase_spin": "problema"
+Trecho do vendedor: "Posso te mandar a proposta fechada ainda hoje com implantação na próxima semana."
+Resposta esperada:
+{{
+  "feedback": "Risco: fechamento antes de impacto/valor claros — confirme necessidade e custo do problema antes da proposta",
+  "confidence": 0.78,
+  "feedback_type": "risk",
+  "estado": {{
+    "interesse": "medio",
+    "resistencia": "baixa",
+    "objecoes_detectadas": [],
+    "engajamento": "medio",
+    "fase_spin": "problema",
+    "proxima_pergunta_spin": "Se nada mudar, qual o custo disso nos próximos 6 meses?",
+    "alerta_risco_spin": true
   }}
 }}
 
@@ -251,17 +308,22 @@ Resposta esperada:
 - clarification: precisa esclarecer algo
 - risk: risco potencial na negociação
 
+# VALORES VÁLIDOS PARA fase_spin:
+- neutro | situacao | problema | implicacao | necessidade
+
 # INSTRUÇÕES:
-1. Analise o "Novo Trecho" considerando o "Estado Atual da Conversa"
-2. Formule feedback tático curto (1-2 frases no máximo) SOMENTE quando necessário
-3. Seja específico e acionável - evite feedback genérico
-4. Se não houver necessidade de intervir, use feedback: null
-5. Avalie sua confiança na análise (0.0 a 1.0):
+1. Primeiro identifique sinais táticos como nos exemplos 1–4; só depois avalie se os campos opcionais de fase (seção SPIN acima) se aplicam.
+2. Analise o "Novo Trecho" considerando o "Estado Atual da Conversa" (incluindo `fase_spin` anterior).
+3. Formule feedback tático curto (1-2 frases no máximo) SOMENTE quando necessário; com `fase_spin` neutro, **não** mencione metodologia nem rotule fases no texto.
+4. Seja específico e acionável - evite feedback genérico
+5. Se não houver necessidade de intervir, use feedback: null
+6. Avalie sua confiança na análise (0.0 a 1.0):
    - 0.9-1.0: Sinal muito claro e explícito
    - 0.7-0.9: Sinal claro com bom contexto
    - 0.5-0.7: Sinal moderado, alguma ambiguidade
    - 0.0-0.5: Incerto, melhor não intervir
-6. Atualize o estado da conversa mantendo a estrutura
+7. Atualize o estado da conversa mantendo **todos** os campos do exemplo (interesse, resistencia, objecoes_detectadas, engajamento, fase_spin, proxima_pergunta_spin, alerta_risco_spin).
+8. Transição de `fase_spin`: só com evidência; caso contrário mantenha o valor já presente no estado atual.
 
 ESTADO ATUAL DA CONVERSA:
 {state_str}

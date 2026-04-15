@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'proto'))
 
 import audio_pipeline_pb2_grpc
 
-from ..config.settings import Settings
+from ..config.settings import Settings, get_settings
 from ..handlers.audio_handler import AudioPipelineServicer
 from ..modules.audio_buffer.service import AudioBufferService
 from ..modules.audio_buffer.sliding_worker import SlidingWindowWorker
@@ -177,6 +177,11 @@ def create_server(config: Settings) -> grpc.Server:
         retry_limit=config.publish_retry_limit,
         retry_backoff_ms=config.publish_retry_backoff_ms,
     )
+
+    # Inject publish_dispatcher into TextAnalysisService for deferred rate-limit dispatch
+    if get_settings().llm_provider != 'ollama':
+        text_analysis_service._publish_dispatcher = publish_dispatcher
+
     transcription_pipeline_service = TranscriptionPipelineService(
         transcription_service=transcription_service,
         text_analysis_service=text_analysis_service,
@@ -251,6 +256,7 @@ def start_server(server: grpc.Server, config: Settings) -> None:
     # Setup signal handlers for graceful shutdown
     def signal_handler(signum, frame):
         logger.info(f"Recebido sinal {signum}, encerrando servidor...")
+        text_analysis_service.shutdown()
         server.stop(0)
         sys.exit(0)
 
@@ -269,4 +275,5 @@ def start_server(server: grpc.Server, config: Settings) -> None:
         server.wait_for_termination()
     except KeyboardInterrupt:
         logger.info("🛑 Servidor encerrado pelo usuário")
+        text_analysis_service.shutdown()
         server.stop(0)

@@ -251,3 +251,15 @@ LLM_CACHE_HIT_RATIO = _metric_or_noop(
     'LLM response cache hit rate (0.0-1.0).',
 )
 
+LLM_RATE_LIMITED_TOTAL = _metric_or_noop(
+    Counter,
+    'llm_rate_limited_total',
+    'Total LLM calls deferred by RPM rate limiter (queued for later dispatch).',
+)
+
+LLM_RATE_QUEUE_SIZE = _metric_or_noop(
+    Gauge,
+    'llm_rate_queue_size',
+    'Current number of LLM analyses waiting in the RPM rate-limit queue.',
+)
+
