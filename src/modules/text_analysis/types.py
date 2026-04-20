@@ -16,6 +16,7 @@ class TranscriptionChunk:
     timestamp_ms: int
     window_start_ms: int
     window_end_ms: int
+    tenant_id: str = ''
 
 
 @dataclass

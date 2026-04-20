@@ -28,6 +28,9 @@ message PublishFeedbackRequest {
   string transcript_text = 11;
   float transcript_confidence = 12;
   AnalysisPayload analysis = 13;
+  // Redundant tenant hint. MUST equal the `tid` claim on the authorization
+  // Bearer token; otherwise the server responds with PERMISSION_DENIED.
+  string tenant_id = 14;
 }
 
 message PublishFeedbackResponse {

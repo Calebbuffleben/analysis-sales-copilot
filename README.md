@@ -99,10 +99,29 @@ OLLAMA_MODEL=qwen2.5:7b  # Best for Portuguese
 
 # Backend Connection
 GRPC_FEEDBACK_URL=localhost:50052  # Your backend server
+# Service-to-service JWT (role=SERVICE) minted by the backend. Required for
+# multi-tenant ingress — the backend rejects unauthenticated gRPC calls and
+# the client refuses to publish events with an empty tenant_id.
+BACKEND_SERVICE_TOKEN=eyJ...
 
 # Logging
 LOG_LEVEL=INFO  # Use DEBUG for troubleshooting
 ```
+
+### Multi-tenant ingress contract
+
+- `BackendFeedbackClient` envia em cada chamada gRPC:
+  - `authorization: Bearer ${BACKEND_SERVICE_TOKEN}`
+  - `x-tenant-id: <tenant efetivo>` (obrigatório para tokens `role=SERVICE`;
+    vira o tenant autoritativo da chamada).
+- `tenant_id` acompanha o áudio desde o `AudioChunk` de entrada até o
+  `PublishFeedback` final, passando por `AudioService.process_chunk` →
+  `AudioBufferService` → meta da janela → `TranscriptionChunk` →
+  `BackendFeedbackEvent`. Publicar com `tenant_id` vazio é erro e gera
+  `ValueError`.
+- Detalhes completos do contrato em
+  [`../docs/auth-architecture.md`](../docs/auth-architecture.md) e
+  [`../docs/tenancy.md`](../docs/tenancy.md).
 
 ### Available Models
 

@@ -14,6 +14,9 @@ class Settings:
     grpc_feedback_url: str = 'localhost:50052'
     grpc_feedback_enabled: bool = True
     grpc_feedback_timeout_seconds: float = 5.0
+    # Backend service JWT (role=SERVICE) — required for multi-tenant ingress.
+    # Read from BACKEND_SERVICE_TOKEN at startup; never log its value.
+    grpc_feedback_service_token: Optional[str] = None
     storage_dir: str = '/app/storage'
     audio_buffer_window_seconds: float = 10.0
     audio_buffer_min_window_seconds: float = 4.0
@@ -85,6 +88,7 @@ class Settings:
             grpc_feedback_timeout_seconds=float(
                 os.getenv('GRPC_FEEDBACK_TIMEOUT_SECONDS', '5.0'),
             ),
+            grpc_feedback_service_token=(os.getenv('BACKEND_SERVICE_TOKEN') or None),
             storage_dir=os.getenv('STORAGE_DIR', '/app/storage'),
             audio_buffer_window_seconds=float(
                 os.getenv('AUDIO_BUFFER_WINDOW_SECONDS', '10.0'),

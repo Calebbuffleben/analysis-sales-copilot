@@ -168,6 +168,7 @@ def create_server(config: Settings) -> grpc.Server:
         service_url=config.grpc_feedback_url,
         enabled=config.grpc_feedback_enabled,
         timeout_seconds=config.grpc_feedback_timeout_seconds,
+        service_token=config.grpc_feedback_service_token,
     )
     publish_dispatcher = PublishDispatcher(
         backend_feedback_client.publish_feedback,

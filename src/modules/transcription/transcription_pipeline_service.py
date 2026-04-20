@@ -143,6 +143,7 @@ class TranscriptionPipelineService:
             timestamp_ms=int(enriched_meta['window_end_ms']),
             window_start_ms=int(enriched_meta['window_start_ms']),
             window_end_ms=int(enriched_meta['window_end_ms']),
+            tenant_id=str(enriched_meta.get('tenant_id') or ''),
         )
         logger.info(f"[Step 3] Enviando transcrição para análise do Gemini")
         t_ana_start = time.perf_counter()
@@ -227,6 +228,7 @@ class TranscriptionPipelineService:
             transcript_text=transcript.text,
             transcript_confidence=transcript.confidence,
             analysis=analysis,
+            tenant_id=transcript.tenant_id,
         )
 
     def _apply_audio_window_stats(

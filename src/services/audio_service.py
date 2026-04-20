@@ -66,7 +66,8 @@ class AudioService:
         track: str,
         wav_data: bytes,
         sequence: int,
-        timestamp_ms: int
+        timestamp_ms: int,
+        tenant_id: str = '',
     ) -> None:
         """
         Process a single audio chunk.
@@ -115,6 +116,7 @@ class AudioService:
                 channels=stats.channels,
                 timestamp_ms=timestamp_ms,
                 sequence=sequence,
+                tenant_id=tenant_id,
             )
 
     def end_stream(
