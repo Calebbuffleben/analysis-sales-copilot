@@ -12,6 +12,7 @@ from typing import Any, Optional
 import grpc
 
 from ...feedback_trace import log_feedback_trace, make_feedback_trace_id
+from .service_jwt_provider import ServiceJwtProvider
 from .types import BackendFeedbackEvent
 from ...metrics.realtime_metrics import FEEDBACK_PUBLISH_ERRORS_TOTAL
 
@@ -27,6 +28,7 @@ class BackendFeedbackClient:
         enabled: bool = True,
         timeout_seconds: float = 5.0,
         service_token: Optional[str] = None,
+        service_jwt_provider: Optional[ServiceJwtProvider] = None,
     ) -> None:
         self._service_url = service_url
         self._enabled = enabled
@@ -35,6 +37,7 @@ class BackendFeedbackClient:
         # gRPC ingress calls; this one is minted with role=SERVICE and is
         # permitted to operate cross-tenant provided x-tenant-id is passed.
         self._service_token = service_token
+        self._jwt_provider = service_jwt_provider
         self._channel: Optional[grpc.Channel] = None
         self._stub: Optional[Any] = None
         self._feedback_ingestion_pb2: Optional[Any] = None
@@ -89,40 +92,59 @@ class BackendFeedbackClient:
         if analysis.mean_rms_dbfs is not None:
             request.analysis.mean_rms_dbfs = analysis.mean_rms_dbfs
 
-        metadata = self._build_call_metadata(event.tenant_id)
-
-        try:
-            logger.info(f"[Step 6] Enviando feedback gerado pelo Gemini via gRPC para o backend")
-            t0 = time.perf_counter()
-            self._stub.PublishFeedback(
-                request,
-                timeout=self._timeout_seconds,
-                metadata=metadata,
-            )
-            t1 = time.perf_counter()
-        except grpc.RpcError as exc:
-            FEEDBACK_PUBLISH_ERRORS_TOTAL.inc()
-            logger.error(
-                '📨 Feedback publish failed (gRPC) | meetingId=%s | participantId=%s | '
-                'type=%s | code=%s | details=%s',
-                event.meeting_id,
-                event.participant_id,
-                event.feedback_type,
-                exc.code(),
-                exc.details(),
-            )
-            raise
-        except Exception as exc:
-            FEEDBACK_PUBLISH_ERRORS_TOTAL.inc()
-            logger.error(
-                '📨 Feedback publish failed | meetingId=%s | participantId=%s | type=%s | %s',
-                event.meeting_id,
-                event.participant_id,
-                event.feedback_type,
-                exc,
-                exc_info=True,
-            )
-            raise
+        logger.info(
+            '[Step 6] Enviando feedback gerado pelo Gemini via gRPC para o backend',
+        )
+        t0 = time.perf_counter()
+        t1 = t0
+        for attempt in range(2):
+            metadata = self._build_call_metadata(event.tenant_id)
+            try:
+                t0 = time.perf_counter()
+                self._stub.PublishFeedback(
+                    request,
+                    timeout=self._timeout_seconds,
+                    metadata=metadata,
+                )
+                t1 = time.perf_counter()
+                break
+            except grpc.RpcError as exc:
+                details = (exc.details() or '').lower()
+                if (
+                    attempt == 0
+                    and self._jwt_provider is not None
+                    and exc.code() == grpc.StatusCode.UNAUTHENTICATED
+                    and 'expired' in details
+                ):
+                    logger.warning(
+                        'Feedback publish JWT expired; refreshing service token and retrying once | '
+                        'meetingId=%s',
+                        event.meeting_id,
+                    )
+                    self._jwt_provider.invalidate()
+                    continue
+                FEEDBACK_PUBLISH_ERRORS_TOTAL.inc()
+                logger.error(
+                    '📨 Feedback publish failed (gRPC) | meetingId=%s | participantId=%s | '
+                    'type=%s | code=%s | details=%s',
+                    event.meeting_id,
+                    event.participant_id,
+                    event.feedback_type,
+                    exc.code(),
+                    exc.details(),
+                )
+                raise
+            except Exception as exc:
+                FEEDBACK_PUBLISH_ERRORS_TOTAL.inc()
+                logger.error(
+                    '📨 Feedback publish failed | meetingId=%s | participantId=%s | type=%s | %s',
+                    event.meeting_id,
+                    event.participant_id,
+                    event.feedback_type,
+                    exc,
+                    exc_info=True,
+                )
+                raise
 
         transcript_chars = len(event.transcript_text or '')
         publish_grpc_ms = (t1 - t0) * 1000.0
@@ -148,6 +170,11 @@ class BackendFeedbackClient:
         )
         return publish_grpc_ms
 
+    def _auth_token(self) -> Optional[str]:
+        if self._jwt_provider is not None:
+            return self._jwt_provider.get_token()
+        return self._service_token
+
     def _build_call_metadata(self, tenant_id: str) -> tuple[tuple[str, str], ...]:
         """Build per-call gRPC metadata with bearer token + tenant hint.
 
@@ -156,13 +183,14 @@ class BackendFeedbackClient:
         - ``x-tenant-id`` is MANDATORY for service tokens (role=SERVICE) and
           is used as the effective tenant for the call.
         """
-        if not self._service_token:
+        token = self._auth_token()
+        if not token:
             logger.warning(
                 'Publishing feedback without a service token — the backend will reject.',
             )
             return (('x-tenant-id', tenant_id),)
         return (
-            ('authorization', f'Bearer {self._service_token}'),
+            ('authorization', f'Bearer {token}'),
             ('x-tenant-id', tenant_id),
         )
 

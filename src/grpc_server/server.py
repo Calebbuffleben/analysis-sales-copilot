@@ -21,6 +21,7 @@ from ..modules.audio_buffer.service import AudioBufferService
 from ..modules.audio_buffer.sliding_worker import SlidingWindowWorker
 from ..modules.backend_feedback.grpc_feedback_client import BackendFeedbackClient
 from ..modules.backend_feedback.publish_dispatcher import PublishDispatcher
+from ..modules.backend_feedback.service_jwt_provider import ServiceJwtProvider
 from ..modules.text_analysis.text_analysis_service import TextAnalysisService
 from ..modules.transcription.ready_window_dispatcher import ReadyWindowDispatcher
 from ..modules.transcription.transcription_pipeline_service import (
@@ -164,11 +165,27 @@ def create_server(config: Settings) -> grpc.Server:
         process_workers=config.stt_process_workers,
     )
     text_analysis_service = TextAnalysisService()
+    service_jwt_provider: ServiceJwtProvider | None = None
+    if config.grpc_feedback_enabled and config.grpc_feedback_wants_auto_jwt():
+        assert config.backend_http_base_url
+        assert config.service_bootstrap_key
+        assert config.service_token_mint_tenant_slug
+        service_jwt_provider = ServiceJwtProvider(
+            http_base_url=config.backend_http_base_url,
+            bootstrap_key=config.service_bootstrap_key,
+            tenant_slug=config.service_token_mint_tenant_slug,
+            ttl_seconds=config.service_token_mint_ttl_seconds,
+        )
+        service_jwt_provider.prewarm()
+
     backend_feedback_client = BackendFeedbackClient(
         service_url=config.grpc_feedback_url,
         enabled=config.grpc_feedback_enabled,
         timeout_seconds=config.grpc_feedback_timeout_seconds,
-        service_token=config.grpc_feedback_service_token,
+        service_token=config.grpc_feedback_service_token
+        if service_jwt_provider is None
+        else None,
+        service_jwt_provider=service_jwt_provider,
     )
     publish_dispatcher = PublishDispatcher(
         backend_feedback_client.publish_feedback,
@@ -230,9 +247,11 @@ def create_server(config: Settings) -> grpc.Server:
     )
     logger.info(
         'Backend feedback publish | GRPC_FEEDBACK_ENABLED=%s | GRPC_FEEDBACK_URL=%s | '
-        'PUBLISH_QUEUE_MAX_SIZE=%s | PUBLISH_WORKER_THREADS=%s | PUBLISH_MAX_AGE_MS=%s',
+        'SERVICE_JWT_AUTO_MINT=%s | PUBLISH_QUEUE_MAX_SIZE=%s | PUBLISH_WORKER_THREADS=%s | '
+        'PUBLISH_MAX_AGE_MS=%s',
         config.grpc_feedback_enabled,
         config.grpc_feedback_url,
+        service_jwt_provider is not None,
         config.publish_queue_max_size,
         config.publish_worker_threads,
         config.publish_max_age_ms,

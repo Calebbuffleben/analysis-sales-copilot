@@ -71,6 +71,32 @@ def _stub_grpc_pb2(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+class _FakeJwtProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def get_token(self) -> str:
+        self.calls += 1
+        return 'dynamic-jwt'
+
+
+def test_metadata_uses_jwt_provider_when_configured() -> None:
+    prov = _FakeJwtProvider()
+    client = BackendFeedbackClient(
+        service_url='localhost:50052',
+        enabled=True,
+        service_token=None,
+        service_jwt_provider=prov,  # type: ignore[arg-type]
+    )
+    client.publish_feedback(_make_event('tenant-99'))
+    assert prov.calls >= 1
+    metadata = dict(
+        client._stub.PublishFeedback.call_args.kwargs['metadata'],  # type: ignore[attr-defined]
+    )
+    assert metadata['authorization'] == 'Bearer dynamic-jwt'
+    assert metadata['x-tenant-id'] == 'tenant-99'
+
+
 def test_metadata_includes_bearer_and_tenant_id() -> None:
     client = BackendFeedbackClient(
         service_url='localhost:50052',
