@@ -125,8 +125,14 @@ class SlidingWindowWorker:
         samples_n = max(int(wstats.get('samples_count') or 0), 1)
         speech_ratio = float(wstats.get('speech_count') or 0) / float(samples_n)
         enriched_meta['speech_ratio'] = speech_ratio
-        enriched_meta['mean_rms_dbfs'] = wstats.get('mean_rms_dbfs')
-        logger.info(
+        mean_rms = wstats.get('mean_rms_dbfs')
+        enriched_meta['mean_rms_dbfs'] = mean_rms
+        # INFO only when there is plausible audio; silent tab / muted streams spam otherwise.
+        likely_silence = speech_ratio <= 0.0 and (
+            mean_rms is None or float(mean_rms) < -55.0
+        )
+        log_fn = logger.debug if likely_silence else logger.info
+        log_fn(
             '🔊 Window ready | stream_key=%s | pcm_bytes=%s | duration_ms=%s | '
             'sample_rate=%s | channels=%s | window_start_ms=%s | window_end_ms=%s | '
             'seq=%s | mean_rms_dbfs=%s | speech_ratio=%.4f | peak_abs=%s',
@@ -138,7 +144,7 @@ class SlidingWindowWorker:
             int(meta.get('window_start_ms', 0)),
             int(meta.get('window_end_ms', 0)),
             int(meta.get('sequence', 0)),
-            wstats.get('mean_rms_dbfs'),
+            mean_rms,
             speech_ratio,
             wstats.get('peak_abs'),
         )

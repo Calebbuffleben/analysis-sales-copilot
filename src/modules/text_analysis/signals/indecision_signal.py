@@ -31,6 +31,9 @@ class IndecisionSignalDetector:
         'te retorno',
         'retorno depois',
         'volto nisso',
+        'adiar',
+        'adiamento',
+        'postergar',
     )
 
     def analyze(self, text: str) -> Optional[Dict[str, object]]:

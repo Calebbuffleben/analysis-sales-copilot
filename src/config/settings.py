@@ -14,6 +14,14 @@ class Settings:
     grpc_feedback_url: str = 'localhost:50052'
     grpc_feedback_enabled: bool = True
     grpc_feedback_timeout_seconds: float = 5.0
+    # Backend service JWT (role=SERVICE) — required for multi-tenant ingress.
+    # Read from BACKEND_SERVICE_TOKEN at startup; never log its value.
+    grpc_feedback_service_token: Optional[str] = None
+    # Optional: mint/refresh JWT via POST /auth/service-token (same SERVICE_BOOTSTRAP_KEY as backend).
+    backend_http_base_url: Optional[str] = None
+    service_bootstrap_key: Optional[str] = None
+    service_token_mint_tenant_slug: Optional[str] = None
+    service_token_mint_ttl_seconds: int = 3600
     storage_dir: str = '/app/storage'
     audio_buffer_window_seconds: float = 10.0
     audio_buffer_min_window_seconds: float = 4.0
@@ -48,16 +56,21 @@ class Settings:
     # Load Whisper + sentence-transformers before accepting traffic (avoids multi-minute
     # delay on first real-time window from HF download + model init).
     preload_ml_models: bool = True
-    # Runtime degradation (control plane)
-    degradation_enabled: bool = True
-    degradation_eval_interval_ms: int = 500
-    degradation_l1_queue_age_ms: int = 1000
-    degradation_l2_queue_age_ms: int = 2500
-    degradation_l3_queue_age_ms: int = 5000
-    # Lower = harder to upgrade back to L0 (less L0<->L1 flapping when queue breathes).
-    degradation_hysteresis_factor: float = 0.55
-    degradation_publish_queue_l2_ratio: float = 0.8
-    degradation_publish_queue_l3_ratio: float = 0.95
+    
+    # ===========================================
+    # LLM Configuration
+    # ===========================================
+    # LLM Provider: 'ollama' (free, local) or 'gemini' (Google API)
+    llm_provider: str = 'ollama'
+    
+    # Ollama settings (for local free inference)
+    ollama_base_url: str = 'http://localhost:11434'
+    ollama_model: str = 'llama3.1:8b'
+    ollama_timeout: int = 30
+    
+    # Gemini settings (if using Google API)
+    gemini_api_key: Optional[str] = None
+    gemini_model: str = 'gemini-2.5-flash'
 
     @classmethod
     def from_env(cls) -> 'Settings':
@@ -79,6 +92,23 @@ class Settings:
             grpc_feedback_enabled=os.getenv('GRPC_FEEDBACK_ENABLED', 'true').lower() == 'true',
             grpc_feedback_timeout_seconds=float(
                 os.getenv('GRPC_FEEDBACK_TIMEOUT_SECONDS', '5.0'),
+            ),
+            grpc_feedback_service_token=(os.getenv('BACKEND_SERVICE_TOKEN') or None),
+            backend_http_base_url=(
+                (os.getenv('BACKEND_HTTP_BASE_URL') or '').strip() or None
+            ),
+            service_bootstrap_key=(
+                (os.getenv('SERVICE_BOOTSTRAP_KEY') or '').strip() or None
+            ),
+            service_token_mint_tenant_slug=(
+                (os.getenv('SERVICE_TOKEN_MINT_TENANT_SLUG') or '').strip() or None
+            ),
+            service_token_mint_ttl_seconds=max(
+                60,
+                min(
+                    3600,
+                    int(os.getenv('SERVICE_TOKEN_MINT_TTL_SECONDS', '3600')),
+                ),
             ),
             storage_dir=os.getenv('STORAGE_DIR', '/app/storage'),
             audio_buffer_window_seconds=float(
@@ -132,28 +162,13 @@ class Settings:
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             proto_dir=os.getenv('PROTO_DIR'),
             preload_ml_models=os.getenv('PRELOAD_ML_MODELS', 'true').lower() == 'true',
-            degradation_enabled=os.getenv('DEGRADATION_ENABLED', 'true').lower() == 'true',
-            degradation_eval_interval_ms=int(
-                os.getenv('DEGRADATION_EVAL_INTERVAL_MS', '500'),
-            ),
-            degradation_l1_queue_age_ms=int(
-                os.getenv('DEGRADATION_L1_QUEUE_AGE_MS', '1000'),
-            ),
-            degradation_l2_queue_age_ms=int(
-                os.getenv('DEGRADATION_L2_QUEUE_AGE_MS', '2500'),
-            ),
-            degradation_l3_queue_age_ms=int(
-                os.getenv('DEGRADATION_L3_QUEUE_AGE_MS', '5000'),
-            ),
-            degradation_hysteresis_factor=float(
-                os.getenv('DEGRADATION_HYSTERESIS_FACTOR', '0.55'),
-            ),
-            degradation_publish_queue_l2_ratio=float(
-                os.getenv('DEGRADATION_PUBLISH_QUEUE_L2_RATIO', '0.8'),
-            ),
-            degradation_publish_queue_l3_ratio=float(
-                os.getenv('DEGRADATION_PUBLISH_QUEUE_L3_RATIO', '0.95'),
-            ),
+            # LLM Provider settings
+            llm_provider=os.getenv('LLM_PROVIDER', 'ollama').lower(),
+            ollama_base_url=os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434'),
+            ollama_model=os.getenv('OLLAMA_MODEL', 'llama3.1:8b'),
+            ollama_timeout=int(os.getenv('OLLAMA_TIMEOUT', '30')),
+            gemini_api_key=os.getenv('GEMINI_API_KEY'),
+            gemini_model=os.getenv('GEMINI_MODEL', 'gemini-2.5-flash'),
         )
 
     @staticmethod
@@ -175,6 +190,14 @@ class Settings:
         value = raw.strip().lower()
         return value or None
 
+    def grpc_feedback_wants_auto_jwt(self) -> bool:
+        """True when env requests automatic SERVICE JWT mint/refresh via HTTP bootstrap."""
+        return bool(
+            self.backend_http_base_url
+            and self.service_bootstrap_key
+            and self.service_token_mint_tenant_slug,
+        )
+
     def validate(self) -> None:
         """Validate settings values."""
         if self.grpc_port < 1 or self.grpc_port > 65535:
@@ -185,6 +208,27 @@ class Settings:
             raise ValueError(
                 f'Invalid GRPC_FEEDBACK_TIMEOUT_SECONDS: {self.grpc_feedback_timeout_seconds}',
             )
+        if self.grpc_feedback_enabled:
+            has_static = bool((self.grpc_feedback_service_token or '').strip())
+            wants_mint = self.grpc_feedback_wants_auto_jwt()
+            mint_partial = (
+                bool((self.service_bootstrap_key or '').strip())
+                or bool((self.service_token_mint_tenant_slug or '').strip())
+                or bool((self.backend_http_base_url or '').strip())
+            ) and not wants_mint
+            if mint_partial:
+                raise ValueError(
+                    'Incomplete automatic service JWT config: set all of '
+                    'SERVICE_BOOTSTRAP_KEY, SERVICE_TOKEN_MINT_TENANT_SLUG, and '
+                    'BACKEND_HTTP_BASE_URL (or remove partial values).',
+                )
+            if not has_static and not wants_mint:
+                raise ValueError(
+                    'GRPC_FEEDBACK_ENABLED is true but no backend auth is configured. '
+                    'Set BACKEND_SERVICE_TOKEN, or set SERVICE_BOOTSTRAP_KEY + '
+                    'SERVICE_TOKEN_MINT_TENANT_SLUG + BACKEND_HTTP_BASE_URL for '
+                    'automatic renewal.',
+                )
         if self.audio_buffer_window_seconds <= 0:
             raise ValueError(
                 f'Invalid AUDIO_BUFFER_WINDOW_SECONDS: {self.audio_buffer_window_seconds}',
@@ -247,42 +291,6 @@ class Settings:
             )
         if self.metrics_port < 1 or self.metrics_port > 65535:
             raise ValueError(f'Invalid METRICS_PORT: {self.metrics_port}')
-
-        if self.degradation_eval_interval_ms < 50:
-            raise ValueError(
-                'Invalid DEGRADATION_EVAL_INTERVAL_MS: '
-                f'{self.degradation_eval_interval_ms}',
-            )
-        if not 0.0 < self.degradation_hysteresis_factor <= 1.0:
-            raise ValueError(
-                'Invalid DEGRADATION_HYSTERESIS_FACTOR: '
-                f'{self.degradation_hysteresis_factor}',
-            )
-        if not 0.0 <= self.degradation_l1_queue_age_ms < self.degradation_l2_queue_age_ms:
-            raise ValueError(
-                'Invalid degradation queue age thresholds: '
-                f'L1={self.degradation_l1_queue_age_ms} L2={self.degradation_l2_queue_age_ms}',
-            )
-        if not 0.0 <= self.degradation_l2_queue_age_ms < self.degradation_l3_queue_age_ms:
-            raise ValueError(
-                'Invalid degradation queue age thresholds: '
-                f'L2={self.degradation_l2_queue_age_ms} L3={self.degradation_l3_queue_age_ms}',
-            )
-        if not 0.0 < self.degradation_publish_queue_l2_ratio <= 1.0:
-            raise ValueError(
-                'Invalid DEGRADATION_PUBLISH_QUEUE_L2_RATIO: '
-                f'{self.degradation_publish_queue_l2_ratio}',
-            )
-        if not 0.0 < self.degradation_publish_queue_l3_ratio <= 1.0:
-            raise ValueError(
-                'Invalid DEGRADATION_PUBLISH_QUEUE_L3_RATIO: '
-                f'{self.degradation_publish_queue_l3_ratio}',
-            )
-        if self.degradation_publish_queue_l3_ratio < self.degradation_publish_queue_l2_ratio:
-            raise ValueError(
-                'Invalid degradation publish ratios: '
-                f'L2={self.degradation_publish_queue_l2_ratio} L3={self.degradation_publish_queue_l3_ratio}',
-            )
 
 
 # Global settings instance

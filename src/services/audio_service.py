@@ -66,7 +66,8 @@ class AudioService:
         track: str,
         wav_data: bytes,
         sequence: int,
-        timestamp_ms: int
+        timestamp_ms: int,
+        tenant_id: str = '',
     ) -> None:
         """
         Process a single audio chunk.
@@ -87,13 +88,6 @@ class AudioService:
             participant_id=participant_id,
             track=track,
             chunk_size=chunk_size
-        )
-
-        # Log chunk details
-        logger.info(
-            f"📥 Audio RECEIVED | meetingId={meeting_id} | "
-            f"participantId={participant_id} | chunk={sequence} | "
-            f"size={chunk_size}bytes | timestamp={timestamp_ms}ms"
         )
 
         # Log statistics every 100 chunks
@@ -122,6 +116,7 @@ class AudioService:
                 channels=stats.channels,
                 timestamp_ms=timestamp_ms,
                 sequence=sequence,
+                tenant_id=tenant_id,
             )
 
     def end_stream(

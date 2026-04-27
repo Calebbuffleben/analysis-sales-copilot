@@ -15,14 +15,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'proto'))
 
 import audio_pipeline_pb2_grpc
 
-from ..config.settings import Settings
+from ..config.settings import Settings, get_settings
 from ..handlers.audio_handler import AudioPipelineServicer
 from ..modules.audio_buffer.service import AudioBufferService
 from ..modules.audio_buffer.sliding_worker import SlidingWindowWorker
 from ..modules.backend_feedback.grpc_feedback_client import BackendFeedbackClient
 from ..modules.backend_feedback.publish_dispatcher import PublishDispatcher
+from ..modules.backend_feedback.service_jwt_provider import ServiceJwtProvider
 from ..modules.text_analysis.text_analysis_service import TextAnalysisService
-from ..modules.transcription.degradation_controller import DegradationController
 from ..modules.transcription.ready_window_dispatcher import ReadyWindowDispatcher
 from ..modules.transcription.transcription_pipeline_service import (
     TranscriptionPipelineService,
@@ -88,7 +88,7 @@ def _warmup_ml_models(
     transcription_service: TranscriptionService,
     text_analysis_service: TextAnalysisService,
 ) -> None:
-    """Load Whisper and SBERT before the first audio window (avoids cold-start lag)."""
+    """Load Whisper before the first audio window (avoids cold-start lag)."""
     t0 = time.perf_counter()
     try:
         transcription_service.preload_model()
@@ -96,9 +96,10 @@ def _warmup_ml_models(
         logger.exception('Whisper preload failed — first stream may be slow')
     t1 = time.perf_counter()
     try:
-        text_analysis_service.ensure_model_loaded()
+        # Preloading is not required for Gemini Analyzer API context
+        pass
     except Exception:
-        logger.exception('Sentence-transformers preload failed — first analysis may be slow')
+        logger.exception('LLM loading failed — first analysis may be slow')
     t2 = time.perf_counter()
     logger.info(
         'ML preload complete | whisper_s=%.2f | sbert_s=%.2f | total_s=%.2f',
@@ -164,10 +165,27 @@ def create_server(config: Settings) -> grpc.Server:
         process_workers=config.stt_process_workers,
     )
     text_analysis_service = TextAnalysisService()
+    service_jwt_provider: ServiceJwtProvider | None = None
+    if config.grpc_feedback_enabled and config.grpc_feedback_wants_auto_jwt():
+        assert config.backend_http_base_url
+        assert config.service_bootstrap_key
+        assert config.service_token_mint_tenant_slug
+        service_jwt_provider = ServiceJwtProvider(
+            http_base_url=config.backend_http_base_url,
+            bootstrap_key=config.service_bootstrap_key,
+            tenant_slug=config.service_token_mint_tenant_slug,
+            ttl_seconds=config.service_token_mint_ttl_seconds,
+        )
+        service_jwt_provider.prewarm()
+
     backend_feedback_client = BackendFeedbackClient(
         service_url=config.grpc_feedback_url,
         enabled=config.grpc_feedback_enabled,
         timeout_seconds=config.grpc_feedback_timeout_seconds,
+        service_token=config.grpc_feedback_service_token
+        if service_jwt_provider is None
+        else None,
+        service_jwt_provider=service_jwt_provider,
     )
     publish_dispatcher = PublishDispatcher(
         backend_feedback_client.publish_feedback,
@@ -177,6 +195,11 @@ def create_server(config: Settings) -> grpc.Server:
         retry_limit=config.publish_retry_limit,
         retry_backoff_ms=config.publish_retry_backoff_ms,
     )
+
+    # Inject publish_dispatcher into TextAnalysisService for deferred rate-limit dispatch
+    if get_settings().llm_provider != 'ollama':
+        text_analysis_service._publish_dispatcher = publish_dispatcher
+
     transcription_pipeline_service = TranscriptionPipelineService(
         transcription_service=transcription_service,
         text_analysis_service=text_analysis_service,
@@ -213,6 +236,7 @@ def create_server(config: Settings) -> grpc.Server:
         config.whisper_low_energy_dbfs,
         config.whisper_default_language,
     )
+    logger.info('Gemini LLM Analyzer enabled')
     logger.info(
         'Window queue | WINDOW_QUEUE_MAX_SIZE=%s | WINDOW_WORKER_THREADS=%s | '
         'WINDOW_MAX_AGE_MS=%s | WINDOW_LOW_PRIORITY_SPEECH_RATIO_BELOW=%s',
@@ -223,9 +247,11 @@ def create_server(config: Settings) -> grpc.Server:
     )
     logger.info(
         'Backend feedback publish | GRPC_FEEDBACK_ENABLED=%s | GRPC_FEEDBACK_URL=%s | '
-        'PUBLISH_QUEUE_MAX_SIZE=%s | PUBLISH_WORKER_THREADS=%s | PUBLISH_MAX_AGE_MS=%s',
+        'SERVICE_JWT_AUTO_MINT=%s | PUBLISH_QUEUE_MAX_SIZE=%s | PUBLISH_WORKER_THREADS=%s | '
+        'PUBLISH_MAX_AGE_MS=%s',
         config.grpc_feedback_enabled,
         config.grpc_feedback_url,
+        service_jwt_provider is not None,
         config.publish_queue_max_size,
         config.publish_worker_threads,
         config.publish_max_age_ms,
@@ -236,23 +262,6 @@ def create_server(config: Settings) -> grpc.Server:
         _warmup_ml_models(transcription_service, text_analysis_service)
     else:
         logger.info('PRELOAD_ML_MODELS=false — models load on first use')
-
-    degradation_controller = DegradationController(
-        scheduler=ready_window_dispatcher,
-        pipeline_service=transcription_pipeline_service,
-        publish_dispatcher=publish_dispatcher,
-        base_low_priority_speech_ratio_below=config.window_low_priority_speech_ratio_below,
-        degradation_enabled=config.degradation_enabled,
-        eval_interval_ms=config.degradation_eval_interval_ms,
-        l1_queue_age_ms=config.degradation_l1_queue_age_ms,
-        l2_queue_age_ms=config.degradation_l2_queue_age_ms,
-        l3_queue_age_ms=config.degradation_l3_queue_age_ms,
-        hysteresis_factor=config.degradation_hysteresis_factor,
-        publish_queue_l2_ratio=config.degradation_publish_queue_l2_ratio,
-        publish_queue_l3_ratio=config.degradation_publish_queue_l3_ratio,
-    )
-    degradation_controller.start()
-
     return server
 
 
@@ -267,6 +276,7 @@ def start_server(server: grpc.Server, config: Settings) -> None:
     # Setup signal handlers for graceful shutdown
     def signal_handler(signum, frame):
         logger.info(f"Recebido sinal {signum}, encerrando servidor...")
+        text_analysis_service.shutdown()
         server.stop(0)
         sys.exit(0)
 
@@ -285,4 +295,5 @@ def start_server(server: grpc.Server, config: Settings) -> None:
         server.wait_for_termination()
     except KeyboardInterrupt:
         logger.info("🛑 Servidor encerrado pelo usuário")
+        text_analysis_service.shutdown()
         server.stop(0)

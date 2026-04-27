@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import logging
 import time
-import threading
-from typing import Optional
+from typing import Any, Optional
 
+from ...feedback_trace import log_feedback_trace, make_feedback_trace_id
 from ..audio_buffer.audio_diagnostics import compute_pcm_window_stats
 from ..backend_feedback.publish_dispatcher import PublishDispatcher
 from ..backend_feedback.types import BackendFeedbackEvent
 from ..text_analysis.text_analysis_service import TextAnalysisService
 from ..text_analysis.types import TextAnalysisResult, TranscriptionChunk
-from .execution_profile import ExecutionProfile
+
 from ...metrics.realtime_metrics import (
     ANALYSIS_MS,
     PIPELINE_TOTAL_MS,
@@ -41,18 +41,7 @@ class TranscriptionPipelineService:
         self._publish_dispatcher = publish_dispatcher
         self._default_language = self._normalize_language(default_language)
         self._stream_language_hints: dict[str, str] = {}
-        self._profile_lock = threading.Lock()
-        self._execution_profile = ExecutionProfile(
-            level='L0',
-            use_embeddings=True,
-            compute_category_transition=True,
-            low_priority_speech_ratio_below=0.0,
-        )
 
-    def set_execution_profile(self, profile: ExecutionProfile) -> None:
-        """Called by DegradationController to update execution flags."""
-        with self._profile_lock:
-            self._execution_profile = profile
 
     def _on_window_ready(
         self,
@@ -72,6 +61,7 @@ class TranscriptionPipelineService:
         """Process one ready window: STT, analysis, publish."""
         t_pipeline_start = time.perf_counter()
         t_wall_pipeline_start_ms = int(time.time() * 1000)
+        logger.info(f"[Step 1] Início do processamento da janela de áudio (stream={stream_key})")
         enriched_meta = dict(meta)
         configured_language = self._default_language
         if configured_language:
@@ -107,13 +97,16 @@ class TranscriptionPipelineService:
         transcription = self._transcription_service.transcribe(window_pcm, enriched_meta)
         t_stt_end = time.perf_counter()
 
+        logger.info(f"[Step 2] Transcrição concluída: '{transcription.text}'")
         STT_MS.observe((t_stt_end - t_stt_start) * 1000.0)
         if not transcription.text.strip():
             WINDOW_SKIPPED_EMPTY_TOTAL.inc()
-            logger.info(
+            skip_msg = (
                 '⏭️ Pipeline skip (empty transcript) | stream_key=%s | reason=%s | '
                 'vad_filter=%s | segments=%s | language=%s | fallback_language=%s | '
-                'stt_ms=%.1f | total_ms=%.1f',
+                'stt_ms=%.1f | total_ms=%.1f'
+            )
+            skip_args = (
                 stream_key,
                 transcription.empty_reason,
                 transcription.vad_filter_used,
@@ -123,6 +116,10 @@ class TranscriptionPipelineService:
                 (t_stt_end - t_stt_start) * 1000.0,
                 (t_stt_end - t_pipeline_start) * 1000.0,
             )
+            if transcription.empty_reason == 'low_energy':
+                logger.debug(skip_msg, *skip_args)
+            else:
+                logger.info(skip_msg, *skip_args)
             return
 
         if (
@@ -146,14 +143,11 @@ class TranscriptionPipelineService:
             timestamp_ms=int(enriched_meta['window_end_ms']),
             window_start_ms=int(enriched_meta['window_start_ms']),
             window_end_ms=int(enriched_meta['window_end_ms']),
+            tenant_id=str(enriched_meta.get('tenant_id') or ''),
         )
+        logger.info(f"[Step 3] Enviando transcrição para análise do Gemini")
         t_ana_start = time.perf_counter()
-        with self._profile_lock:
-            execution_profile = self._execution_profile
-        analysis = self._text_analysis_service.analyze(
-            chunk,
-            execution_profile=execution_profile,
-        )
+        analysis = self._text_analysis_service.analyze(chunk)
         self._apply_audio_window_stats(analysis, window_pcm, enriched_meta)
         t_ana_end = time.perf_counter()
         ANALYSIS_MS.observe((t_ana_end - t_ana_start) * 1000.0)
@@ -165,18 +159,35 @@ class TranscriptionPipelineService:
             WINDOW_PROCESSED_TOTAL.inc()
 
         PIPELINE_TOTAL_MS.observe((t_pub_end - t_pipeline_start) * 1000.0)
-        logger.info(
-            '⏱️ Pipeline latency | stream_key=%s | queue_wait_ms=%s | '
-            'window_end_to_pipeline_start_ms=%s | publish_enqueued=%s | '
-            'stt_ms=%.1f | analysis_ms=%.1f | enqueue_ms=%.1f | total_ms=%.1f',
-            stream_key,
-            queue_wait_ms,
-            window_end_to_pipeline_start_ms,
-            published_enqueued,
-            (t_stt_end - t_stt_start) * 1000.0,
-            (t_ana_end - t_ana_start) * 1000.0,
-            (t_pub_end - t_pub_start) * 1000.0,
-            (t_pub_end - t_pipeline_start) * 1000.0,
+        stt_ms = (t_stt_end - t_stt_start) * 1000.0
+        analysis_ms = (t_ana_end - t_ana_start) * 1000.0
+        enqueue_ms = (t_pub_end - t_pub_start) * 1000.0
+        total_ms = (t_pub_end - t_pipeline_start) * 1000.0
+        tid = make_feedback_trace_id(
+            chunk.meeting_id,
+            chunk.participant_id,
+            chunk.window_end_ms,
+        )
+        log_feedback_trace(
+            logger,
+            logging.INFO,
+            'python.pipeline',
+            trace_id=tid,
+            meeting_id=chunk.meeting_id,
+            participant_id=chunk.participant_id,
+            window_end_ms=chunk.window_end_ms,
+            extra={
+                'streamKey': stream_key,
+                'queueWaitMs': queue_wait_ms,
+                'windowEndToPipelineStartMs': window_end_to_pipeline_start_ms,
+                'publishEnqueued': published_enqueued,
+                'sttMs': round(stt_ms, 1),
+                'analysisMs': round(analysis_ms, 1),
+                'enqueueMs': round(enqueue_ms, 1),
+                'totalMs': round(total_ms, 1),
+                'hasDirectFeedback': bool(analysis.direct_feedback),
+                'transcriptChars': len(chunk.text or ''),
+            },
         )
 
     def _handle_transcript(
@@ -217,6 +228,7 @@ class TranscriptionPipelineService:
             transcript_text=transcript.text,
             transcript_confidence=transcript.confidence,
             analysis=analysis,
+            tenant_id=transcript.tenant_id,
         )
 
     def _apply_audio_window_stats(

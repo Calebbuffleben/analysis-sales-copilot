@@ -1,0 +1,53 @@
+version: '3.8'
+
+# Ollama - 100% FREE local LLM inference
+# No API costs, no quotas, no rate limits
+# 
+# Usage:
+# 1. Start Ollama: docker-compose -f docker-compose.ollama.yml up -d
+# 2. Pull model: docker exec -it ollama ollama pull llama3.1:8b
+# 3. Check status: curl http://localhost:11434/api/tags
+#
+# Recommended models for sales analysis:
+# - llama3.1:8b (fast, good quality, ~4.7GB)
+# - qwen2.5:7b (excellent for PT-BR, ~4.1GB)
+# - mistral:7b (balanced, ~4.1GB)
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      # Optional: Use GPU if available (NVIDIA)
+      # NVIDIA_VISIBLE_DEVICES=all
+      # NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      
+      # For Apple Silicon (M1/M2/M3), Ollama auto-detects Metal GPU
+      # For CPU-only inference (no GPU), no special config needed
+      
+      # Memory limits (adjust based on your server)
+      OLLAMA_NUM_PARALLEL: "2"  # Handle 2 concurrent requests
+      OLLAMA_MAX_LOADED_MODELS: "1"  # Keep only 1 model loaded
+    deploy:
+      resources:
+        limits:
+          memory: 8G  # Adjust based on model size
+        reservations:
+          memory: 4G
+    # Uncomment for NVIDIA GPU support
+    # runtime: nvidia
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  ollama_data:
+    driver: local

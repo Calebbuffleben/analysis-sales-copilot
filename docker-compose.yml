@@ -1,18 +1,42 @@
+# Self-Hosted Deployment (Gemini)
+
 services:
+  # ==========================================
+  # Python Service - Audio Pipeline + LLM Analysis
+  # ==========================================
   audio-pipeline-service:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: audio-pipeline-service
     ports:
-      - "50051:50051"
-      - "9100:9100"
+      - "50051:50051"  # gRPC audio pipeline
+      - "9100:9100"    # Prometheus metrics
+    env_file:
+      - .env
+    # Same machine, backend on host or published port: localhost inside the container is NOT the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      - GRPC_PORT=50051
-      - GRPC_FEEDBACK_URL=host.docker.internal:50052
-      - METRICS_PORT=9100
-      - METRICS_ENABLED=true
+      # Do not use ${GRPC_FEEDBACK_URL} here — Compose reads python-service/.env for interpolation and .env often has localhost.
+      - GRPC_FEEDBACK_URL=${DOCKER_GRPC_FEEDBACK_TARGET:-host.docker.internal:50052}
+      - BACKEND_HTTP_BASE_URL=${DOCKER_BACKEND_HTTP_BASE_URL:-http://host.docker.internal:3001}
     volumes:
-      # Opcional: montar volume para salvar arquivos de áudio
+      # Persistent storage for audio files
       - ./storage:/app/storage
     restart: unless-stopped
+    networks:
+      - meet-network
+    # Health check for the service
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:9100/metrics')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s  # Give time for ML models to load
+
+# Shared network for inter-service communication
+networks:
+  meet-network:
+    driver: bridge
+

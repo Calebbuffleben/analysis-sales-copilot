@@ -145,7 +145,7 @@ class PublishDispatcher:
             return len(self._queue)
 
     def get_max_queue_size(self) -> int:
-        """Configured max queue capacity (for degradation control plane)."""
+        """Configured max queue capacity (backpressure / bounded queue)."""
         return self._max_queue_size
 
     def _worker_loop(self) -> None:

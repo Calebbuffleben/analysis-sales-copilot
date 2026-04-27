@@ -82,7 +82,8 @@ class AudioPipelineServicer(audio_pipeline_pb2_grpc.AudioPipelineServiceServicer
                     track=chunk.track,
                     wav_data=chunk.wav_data,
                     sequence=chunk.sequence,
-                    timestamp_ms=chunk.timestamp_ms
+                    timestamp_ms=chunk.timestamp_ms,
+                    tenant_id=getattr(chunk, 'tenant_id', '') or '',
                 )
 
                 # TODO: Integrate with the audio buffering pipeline.
