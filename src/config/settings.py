@@ -20,7 +20,6 @@ class Settings:
     # Optional: mint/refresh JWT via POST /auth/service-token (same SERVICE_BOOTSTRAP_KEY as backend).
     backend_http_base_url: Optional[str] = None
     service_bootstrap_key: Optional[str] = None
-    service_token_mint_tenant_slug: Optional[str] = None
     service_token_mint_ttl_seconds: int = 3600
     storage_dir: str = '/app/storage'
     audio_buffer_window_seconds: float = 10.0
@@ -99,9 +98,6 @@ class Settings:
             ),
             service_bootstrap_key=(
                 (os.getenv('SERVICE_BOOTSTRAP_KEY') or '').strip() or None
-            ),
-            service_token_mint_tenant_slug=(
-                (os.getenv('SERVICE_TOKEN_MINT_TENANT_SLUG') or '').strip() or None
             ),
             service_token_mint_ttl_seconds=max(
                 60,
@@ -194,8 +190,7 @@ class Settings:
         """True when env requests automatic SERVICE JWT mint/refresh via HTTP bootstrap."""
         return bool(
             self.backend_http_base_url
-            and self.service_bootstrap_key
-            and self.service_token_mint_tenant_slug,
+            and self.service_bootstrap_key,
         )
 
     def validate(self) -> None:
@@ -213,20 +208,19 @@ class Settings:
             wants_mint = self.grpc_feedback_wants_auto_jwt()
             mint_partial = (
                 bool((self.service_bootstrap_key or '').strip())
-                or bool((self.service_token_mint_tenant_slug or '').strip())
                 or bool((self.backend_http_base_url or '').strip())
             ) and not wants_mint
             if mint_partial:
                 raise ValueError(
                     'Incomplete automatic service JWT config: set all of '
-                    'SERVICE_BOOTSTRAP_KEY, SERVICE_TOKEN_MINT_TENANT_SLUG, and '
+                    'SERVICE_BOOTSTRAP_KEY and '
                     'BACKEND_HTTP_BASE_URL (or remove partial values).',
                 )
             if not has_static and not wants_mint:
                 raise ValueError(
                     'GRPC_FEEDBACK_ENABLED is true but no backend auth is configured. '
                     'Set BACKEND_SERVICE_TOKEN, or set SERVICE_BOOTSTRAP_KEY + '
-                    'SERVICE_TOKEN_MINT_TENANT_SLUG + BACKEND_HTTP_BASE_URL for '
+                    'BACKEND_HTTP_BASE_URL for '
                     'automatic renewal.',
                 )
         if self.audio_buffer_window_seconds <= 0:

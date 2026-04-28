@@ -22,7 +22,6 @@ class ServiceJwtProvider:
         self,
         http_base_url: str,
         bootstrap_key: str,
-        tenant_slug: str,
         *,
         ttl_seconds: int = 3600,
         refresh_skew_seconds: int = _DEFAULT_REFRESH_SKEW_SECONDS,
@@ -30,7 +29,6 @@ class ServiceJwtProvider:
     ) -> None:
         self._http_base = http_base_url.rstrip('/')
         self._bootstrap_key = bootstrap_key.strip()
-        self._tenant_slug = tenant_slug.strip().lower()
         self._ttl_seconds = ttl_seconds
         self._skew = refresh_skew_seconds
         self._session = session or requests.Session()
@@ -67,7 +65,6 @@ class ServiceJwtProvider:
                     'x-service-bootstrap-key': self._bootstrap_key,
                 },
                 json={
-                    'tenantSlug': self._tenant_slug,
                     'label': 'python-audio-pipeline',
                     'ttlSeconds': self._ttl_seconds,
                 },
@@ -102,7 +99,6 @@ class ServiceJwtProvider:
         skew_eff = min(float(self._skew), max(10.0, ttl_remaining - 5.0))
         self._refresh_not_after = exp_s - skew_eff
         logger.info(
-            'Minted backend SERVICE JWT via bootstrap | tenant_slug=%s | ttl_requested=%ss',
-            self._tenant_slug,
+            'Minted backend SERVICE JWT via bootstrap | ttl_requested=%ss',
             self._ttl_seconds,
         )
