@@ -98,11 +98,19 @@ docker-compose logs -f audio-pipeline-service
 OLLAMA_MODEL=qwen2.5:7b  # Best for Portuguese
 
 # Backend Connection
-GRPC_FEEDBACK_URL=localhost:50052  # Your backend server
-# Service-to-service JWT (role=SERVICE) minted by the backend. Required for
-# multi-tenant ingress — the backend rejects unauthenticated gRPC calls and
-# the client refuses to publish events with an empty tenant_id.
-BACKEND_SERVICE_TOKEN=eyJ...
+GRPC_FEEDBACK_URL=localhost:50052  # Your backend server (host:port for gRPC)
+
+# Auth for PublishFeedback (escolha A ou B)
+#
+# A) JWT estático (role=SERVICE), mint manual via POST /auth/service-token:
+# BACKEND_SERVICE_TOKEN=eyJ...
+#
+# B) Auto-renovação (recomendado): mesmo SERVICE_BOOTSTRAP_KEY do backend +
+#    base URL HTTP do Nest (para POST /auth/service-token). O SERVICE JWT é
+#    global; o tenant por chamada vem de x-tenant-id (derivado do áudio).
+# BACKEND_HTTP_BASE_URL=http://localhost:3001
+# SERVICE_BOOTSTRAP_KEY=<mesmo valor do backend>
+# SERVICE_TOKEN_MINT_TTL_SECONDS=3600
 
 # Logging
 LOG_LEVEL=INFO  # Use DEBUG for troubleshooting
@@ -111,9 +119,9 @@ LOG_LEVEL=INFO  # Use DEBUG for troubleshooting
 ### Multi-tenant ingress contract
 
 - `BackendFeedbackClient` envia em cada chamada gRPC:
-  - `authorization: Bearer ${BACKEND_SERVICE_TOKEN}`
+  - `authorization: Bearer <SERVICE JWT>` (estático em `BACKEND_SERVICE_TOKEN` ou obtido via `ServiceJwtProvider` + `/auth/service-token`)
   - `x-tenant-id: <tenant efetivo>` (obrigatório para tokens `role=SERVICE`;
-    vira o tenant autoritativo da chamada).
+    o backend valida tenant ativo e usa esse valor como tenant da chamada).
 - `tenant_id` acompanha o áudio desde o `AudioChunk` de entrada até o
   `PublishFeedback` final, passando por `AudioService.process_chunk` →
   `AudioBufferService` → meta da janela → `TranscriptionChunk` →
