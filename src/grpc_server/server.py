@@ -169,11 +169,9 @@ def create_server(config: Settings) -> grpc.Server:
     if config.grpc_feedback_enabled and config.grpc_feedback_wants_auto_jwt():
         assert config.backend_http_base_url
         assert config.service_bootstrap_key
-        assert config.service_token_mint_tenant_slug
         service_jwt_provider = ServiceJwtProvider(
             http_base_url=config.backend_http_base_url,
             bootstrap_key=config.service_bootstrap_key,
-            tenant_slug=config.service_token_mint_tenant_slug,
             ttl_seconds=config.service_token_mint_ttl_seconds,
         )
         service_jwt_provider.prewarm()

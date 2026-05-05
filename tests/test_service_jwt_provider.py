@@ -18,6 +18,7 @@ from src.modules.backend_feedback.service_jwt_provider import ServiceJwtProvider
 
 def test_mint_once_then_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     posts = {'n': 0}
+    bodies: list[dict | None] = []
 
     def fake_post(
         self: requests.Session,
@@ -27,6 +28,7 @@ def test_mint_once_then_cache(monkeypatch: pytest.MonkeyPatch) -> None:
         timeout: float | None = None,
     ) -> object:
         posts['n'] += 1
+        bodies.append(json)
         exp_ms = (time.time() + 3600.0) * 1000.0
 
         class Resp:
@@ -46,12 +48,13 @@ def test_mint_once_then_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     p = ServiceJwtProvider(
         'http://api.example',
         'bootstrap-secret',
-        'acme',
         ttl_seconds=3600,
     )
     assert p.get_token() == 'jwt-one'
     assert p.get_token() == 'jwt-one'
     assert posts['n'] == 1
+    assert bodies == [{'label': 'python-audio-pipeline', 'ttlSeconds': 3600}]
+    assert 'tenantSlug' not in bodies[0]
 
 
 def test_invalidate_forces_remint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -82,7 +85,7 @@ def test_invalidate_forces_remint(monkeypatch: pytest.MonkeyPatch) -> None:
         return Resp()
 
     monkeypatch.setattr(requests.Session, 'post', fake_post)
-    p = ServiceJwtProvider('http://api.example', 'boot', 'slug', ttl_seconds=3600)
+    p = ServiceJwtProvider('http://api.example', 'boot', ttl_seconds=3600)
     assert p.get_token() == 'jwt-1'
     p.invalidate()
     assert p.get_token() == 'jwt-2'
