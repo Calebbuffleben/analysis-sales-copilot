@@ -107,7 +107,9 @@ class GeminiAnalyzer:
                 'direct_feedback': validated.direct_feedback,
                 'confidence': validated.confidence,
                 'feedback_type': validated.feedback_type,
-                'conversation_state': validated.estado.to_dict()
+                'conversation_state': validated.estado.to_dict(),
+                'playbook_template_key': validated.playbook_template_key,
+                'playbook_variables': dict(validated.playbook_variables),
             }
 
         except Exception as e:
@@ -158,7 +160,9 @@ class GeminiAnalyzer:
             'direct_feedback': '',
             'confidence': 0.0,
             'feedback_type': None,
-            'conversation_state': state
+            'conversation_state': state,
+            'playbook_template_key': None,
+            'playbook_variables': {},
         }
 
     def _build_prompt(self, text: str, state: Dict[str, Any]) -> str:
@@ -290,6 +294,28 @@ Resposta esperada:
   }}
 }}
 
+Exemplo 7 - Com playbook (opcional):
+Trecho: "O produto do concorrente X está mais barato que o vosso."
+Resposta esperada (note `playbook_template_key` e `playbook_variables` na raiz):
+{{
+  "feedback": "Cliente comparou com concorrente — contraste valor/diferenciação antes de discutir só preço",
+  "confidence": 0.88,
+  "feedback_type": "objection",
+  "playbook_template_key": "preco_vs_concorrente",
+  "playbook_variables": {{
+    "competidor": "X"
+  }},
+  "estado": {{
+    "interesse": "medio",
+    "resistencia": "alta",
+    "objecoes_detectadas": ["preco", "concorrente"],
+    "engajamento": "medio",
+    "fase_spin": "neutro",
+    "proxima_pergunta_spin": "",
+    "alerta_risco_spin": false
+  }}
+}}
+
 # CATEGORIAS VÁLIDAS PARA objecoes_detectadas:
 - preco: preocupações com preço/custo
 - concorrente: comparações com concorrentes
@@ -324,6 +350,14 @@ Resposta esperada:
    - 0.0-0.5: Incerto, melhor não intervir
 7. Atualize o estado da conversa mantendo **todos** os campos do exemplo (interesse, resistencia, objecoes_detectadas, engajamento, fase_spin, proxima_pergunta_spin, alerta_risco_spin).
 8. Transição de `fase_spin`: só com evidência; caso contrário mantenha o valor já presente no estado atual.
+
+# PLAYBOOK (opcional — raiz do JSON, fora de `estado`)
+
+Quando um **roteiro acionável** cadastrado no tenant claramente se aplica ao trecho (ex.: objeção de preço → template `preco`), inclua no objeto raiz:
+- `playbook_template_key`: string curta (slug do template, máx. 64 caracteres). Omita ou use `null` se não houver template aplicável.
+- `playbook_variables`: objeto com strings para interpolar placeholders nos passos do template (ex.: `{"competidor": "Concorrente X", "produto": "Suite Pro"}`). No máximo ~32 chaves; valores curtos.
+
+Se não tiver certeza, omita ambos ou use `null`.
 
 ESTADO ATUAL DA CONVERSA:
 {state_str}

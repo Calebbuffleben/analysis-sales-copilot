@@ -32,7 +32,9 @@ class FallbackAnalysisResult:
             'direct_feedback': self.feedback,
             'confidence': self.confidence,
             'feedback_type': self.feedback_type,
-            'conversation_state': self.state_updates or {}
+            'conversation_state': self.state_updates or {},
+            'playbook_template_key': None,
+            'playbook_variables': {},
         }
 
 

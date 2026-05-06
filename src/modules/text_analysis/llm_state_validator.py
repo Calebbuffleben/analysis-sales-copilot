@@ -18,6 +18,12 @@ _VALID_FASE_SPIN = frozenset({"neutro", "situacao", "problema", "implicacao", "n
 # Max length for suggested SPIN question (prompt / UI safety)
 _PROXIMA_PERGUNTA_SPIN_MAX_LEN = 500
 
+# Aligned with backend PLAYBOOK_MAX_TEMPLATE_KEY_CHARS / payload caps
+_PLAYBOOK_MAX_TEMPLATE_KEY_CHARS = 64
+_PLAYBOOK_MAX_VARIABLE_KEYS = 32
+_PLAYBOOK_MAX_VAR_KEY_CHARS = 64
+_PLAYBOOK_MAX_VAR_VALUE_CHARS = 2000
+
 # Predefined objection categories (prevents LLM from inventing random categories)
 VALID_OBJECTION_CATEGORIES = frozenset({
     "preco",           # Price/cost concerns
@@ -29,6 +35,61 @@ VALID_OBJECTION_CATEGORIES = frozenset({
     "implementacao",   # Implementation concerns
     "roi",            # ROI doubts
 })
+
+
+def normalize_playbook_template_key(raw: object) -> str | None:
+    """Normalize LLM hint template key; None if empty after trim."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    if len(s) > _PLAYBOOK_MAX_TEMPLATE_KEY_CHARS:
+        return s[:_PLAYBOOK_MAX_TEMPLATE_KEY_CHARS]
+    return s
+
+
+def normalize_playbook_variables(raw: object) -> dict[str, str]:
+    """Coerce playbook_variables to a bounded dict[str, str]."""
+    if not raw or not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        if len(out) >= _PLAYBOOK_MAX_VARIABLE_KEYS:
+            break
+        ks = str(k).strip()
+        if len(ks) > _PLAYBOOK_MAX_VAR_KEY_CHARS:
+            ks = ks[:_PLAYBOOK_MAX_VAR_KEY_CHARS]
+        if not ks:
+            continue
+        if v is None:
+            vs = ""
+        else:
+            vs = str(v).strip()
+        if len(vs) > _PLAYBOOK_MAX_VAR_VALUE_CHARS:
+            vs = vs[:_PLAYBOOK_MAX_VAR_VALUE_CHARS]
+        out[ks] = vs
+    return out
+
+
+def build_playbook_hint_json(
+    template_key: str | None,
+    variables: dict[str, str] | None,
+) -> str:
+    """Serialize JSON for AnalysisPayload.playbook_hint_json; empty if no key."""
+    key = normalize_playbook_template_key(template_key)
+    if not key:
+        return ""
+    import json
+
+    vars_norm = normalize_playbook_variables(variables or {})
+    return json.dumps(
+        {
+            "playbook_template_key": key,
+            "playbook_variables": vars_norm,
+        },
+        ensure_ascii=False,
+    )
 
 
 class ConversationState(BaseModel):
@@ -168,6 +229,14 @@ class LLMAnalysisResult(BaseModel):
         default_factory=ConversationState.default_state,
         description="Updated conversation state"
     )
+    playbook_template_key: str | None = Field(
+        default=None,
+        description="Tenant playbook template slug for resolver (optional)",
+    )
+    playbook_variables: dict[str, str] = Field(
+        default_factory=dict,
+        description="Variables for {{placeholder}} interpolation in template steps",
+    )
     
     @field_validator("feedback_type")
     @classmethod
@@ -186,6 +255,16 @@ class LLMAnalysisResult(BaseModel):
     def validate_confidence(cls, v: float) -> float:
         """Ensure confidence is in valid range."""
         return max(0.0, min(1.0, v))
+
+    @field_validator("playbook_template_key", mode="before")
+    @classmethod
+    def validate_playbook_template_key(cls, v) -> str | None:
+        return normalize_playbook_template_key(v)
+
+    @field_validator("playbook_variables", mode="before")
+    @classmethod
+    def validate_playbook_variables(cls, v) -> dict[str, str]:
+        return normalize_playbook_variables(v)
     
     @property
     def direct_feedback(self) -> str:
@@ -197,6 +276,31 @@ class LLMAnalysisResult(BaseModel):
         """Get conversation state as JSON string."""
         import json
         return json.dumps(self.estado.to_dict(), ensure_ascii=False)
+
+    @property
+    def playbook_hint_json(self) -> str:
+        """JSON string for gRPC playbook_hint_json (empty when no template key)."""
+        return build_playbook_hint_json(
+            self.playbook_template_key,
+            self.playbook_variables,
+        )
+
+
+def _playbook_fields_from_raw(raw_response: dict) -> tuple[str | None, dict[str, str]]:
+    """Extract playbook hint from raw LLM JSON (supports alternate key names)."""
+    key_raw = (
+        raw_response.get("playbook_template_key")
+        or raw_response.get("template_key")
+        or raw_response.get("playbookTemplateKey")
+    )
+    vars_raw = (
+        raw_response.get("playbook_variables")
+        or raw_response.get("playbookVariables")
+        or raw_response.get("variables")
+    )
+    key = normalize_playbook_template_key(key_raw)
+    variables = normalize_playbook_variables(vars_raw)
+    return key, variables
 
 
 def validate_conversation_state(raw_state: dict) -> ConversationState:
@@ -220,12 +324,15 @@ def validate_llm_response(raw_response: dict) -> LLMAnalysisResult:
         # Extract estado if present, otherwise use default
         estado_raw = raw_response.get("estado", {})
         estado = validate_conversation_state(estado_raw)
-        
+        p_key, p_vars = _playbook_fields_from_raw(raw_response)
+
         return LLMAnalysisResult(
             feedback=raw_response.get("feedback"),
             confidence=raw_response.get("confidence", 0.5),
             feedback_type=raw_response.get("feedback_type"),
             estado=estado,
+            playbook_template_key=p_key,
+            playbook_variables=p_vars,
         )
     except Exception:
         # Return safe fallback
@@ -234,4 +341,6 @@ def validate_llm_response(raw_response: dict) -> LLMAnalysisResult:
             confidence=0.0,
             feedback_type=None,
             estado=ConversationState.default_state(),
+            playbook_template_key=None,
+            playbook_variables={},
         )

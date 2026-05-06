@@ -1,6 +1,6 @@
 """Types used by text analysis and feedback mapping."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 
@@ -30,6 +30,8 @@ class TextAnalysisResult:
     samples_count: Optional[int] = None
     speech_count: Optional[int] = None
     mean_rms_dbfs: Optional[float] = None
+    # JSON for gRPC AnalysisPayload.playbook_hint_json (template key + variables).
+    playbook_hint_json: str = ""
 
     def to_payload_dict(self) -> Dict[str, Any]:
         """Convert the analysis result to a payload-friendly dict."""
@@ -47,5 +49,7 @@ class TextAnalysisResult:
             payload['speech_count'] = self.speech_count
         if self.mean_rms_dbfs is not None:
             payload['mean_rms_dbfs'] = self.mean_rms_dbfs
+        if (self.playbook_hint_json or '').strip():
+            payload['playbook_hint_json'] = self.playbook_hint_json
 
         return payload

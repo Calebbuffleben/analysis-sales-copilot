@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional
 
 from .gemini_analyzer import GeminiAnalyzer, QuotaExhaustedError
 from .ollama_analyzer import OllamaAnalyzer
-from .llm_state_validator import ConversationState, validate_conversation_state
+from .llm_state_validator import ConversationState, validate_conversation_state, build_playbook_hint_json
 from .llm_cache import SimpleTextCache
 from .llm_logger import log_llm_interaction, log_llm_state_change
 from .rule_based_analyzer import analyze_text_fallback
@@ -36,6 +36,17 @@ from ...metrics.realtime_metrics import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _playbook_hint_for_result_dict(analysis_result: Dict[str, Any]) -> str:
+    """Build playbook_hint_json when confidence is high enough to trust the LLM hint."""
+    conf = float(analysis_result.get('confidence', 0.0) or 0.0)
+    if conf < 0.6:
+        return ""
+    return build_playbook_hint_json(
+        analysis_result.get('playbook_template_key'),
+        analysis_result.get('playbook_variables'),
+    )
 
 
 class _DeferredAnalysis:
@@ -216,6 +227,7 @@ class TextAnalysisService:
                     result.get('conversation_state', {}),
                     ensure_ascii=False,
                 ),
+                playbook_hint_json=_playbook_hint_for_result_dict(result),
             )
 
             event = BackendFeedbackEvent(
@@ -437,11 +449,14 @@ class TextAnalysisService:
         with self._lock:
             self._state[context_key] = new_state.to_dict()
 
+        playbook_hint_json = _playbook_hint_for_result_dict(analysis_result)
+
         result = TextAnalysisResult(
             direct_feedback=direct_feedback,
             confidence=confidence,
             feedback_type=feedback_type,
             conversation_state_json=json.dumps(new_state.to_dict(), ensure_ascii=False),
+            playbook_hint_json=playbook_hint_json,
         )
 
         # Structured logging

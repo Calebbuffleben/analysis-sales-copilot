@@ -14,7 +14,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x18\x66\x65\x65\x64\x62\x61\x63k_ingestion.proto\x12\x12\x66\x65\x65\x64\x62\x61\x63k_ingestion\"\x8f\x01\n\x0f\x41nalysisPayload\x12\x17\n\x0f\x64irect_feedback\x18\x01 \x01(\t\x12\x1f\n\x17\x63onversation_state_json\x18\x02 \x01(\t\x12\x15\n\rsamples_count\x18\x03 \x01(\x05\x12\x14\n\x0cspeech_count\x18\x04 \x01(\x05\x12\x15\n\rmean_rms_dbfs\x18\x05 \x01(\x02\"\xf3\x02\n\x16PublishFeedbackRequest\x12\x12\n\nmeeting_id\x18\x01 \x01(\t\x12\x16\n\x0eparticipant_id\x18\x02 \x01(\t\x12\x18\n\x10participant_name\x18\x03 \x01(\t\x12\x18\n\x10participant_role\x18\x04 \x01(\t\x12\x15\n\rfeedback_type\x18\x05 \x01(\t\x12\x10\n\x08severity\x18\x06 \x01(\t\x12\r\n\x05ts_ms\x18\x07 \x01(\x03\x12\x17\n\x0fwindow_start_ms\x18\x08 \x01(\x03\x12\x15\n\rwindow_end_ms\x18\t \x01(\x03\x12\x0f\n\x07message\x18\n \x01(\t\x12\x17\n\x0ftranscript_text\x18\x0b \x01(\t\x12\x1d\n\x15transcript_confidence\x18\x0c \x01(\x02\x12\x35\n\x08\x61nalysis\x18\r \x01(\x0b\x32#.feedback_ingestion.AnalysisPayload\x12\x11\n\ttenant_id\x18\x0e \x01(\t\"Q\n\x17PublishFeedbackResponse\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x13\n\x0b\x66\x65\x65\x64\x62\x61\x63k_id\x18\x02 \x01(\t\x12\x0f\n\x07message\x18\x03 \x01(\t2\x86\x01\n\x18\x46\x65\x65\x64\x62\x61\x63kIngestionService\x12j\n\x0fPublishFeedback\x12*.feedback_ingestion.PublishFeedbackRequest\x1a+.feedback_ingestion.PublishFeedbackResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x18\x66\x65\x65\x64\x62\x61\x63k_ingestion.proto\x12\x12\x66\x65\x65\x64\x62\x61\x63k_ingestion\"\xab\x01\n\x0f\x41nalysisPayload\x12\x17\n\x0f\x64irect_feedback\x18\x01 \x01(\t\x12\x1f\n\x17\x63onversation_state_json\x18\x02 \x01(\t\x12\x15\n\rsamples_count\x18\x03 \x01(\x05\x12\x14\n\x0cspeech_count\x18\x04 \x01(\x05\x12\x15\n\rmean_rms_dbfs\x18\x05 \x01(\x02\x12\x1a\n\x12playbook_hint_json\x18\x06 \x01(\t\"\xf3\x02\n\x16PublishFeedbackRequest\x12\x12\n\nmeeting_id\x18\x01 \x01(\t\x12\x16\n\x0eparticipant_id\x18\x02 \x01(\t\x12\x18\n\x10participant_name\x18\x03 \x01(\t\x12\x18\n\x10participant_role\x18\x04 \x01(\t\x12\x15\n\rfeedback_type\x18\x05 \x01(\t\x12\x10\n\x08severity\x18\x06 \x01(\t\x12\r\n\x05ts_ms\x18\x07 \x01(\x03\x12\x17\n\x0fwindow_start_ms\x18\x08 \x01(\x03\x12\x15\n\rwindow_end_ms\x18\t \x01(\x03\x12\x0f\n\x07message\x18\n \x01(\t\x12\x17\n\x0ftranscript_text\x18\x0b \x01(\t\x12\x1d\n\x15transcript_confidence\x18\x0c \x01(\x02\x12\x35\n\x08\x61nalysis\x18\r \x01(\x0b\x32#.feedback_ingestion.AnalysisPayload\x12\x11\n\ttenant_id\x18\x0e \x01(\t\"Q\n\x17PublishFeedbackResponse\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x13\n\x0b\x66\x65\x65\x64\x62\x61\x63k_id\x18\x02 \x01(\t\x12\x0f\n\x07message\x18\x03 \x01(\t2\x86\x01\n\x18\x46\x65\x65\x64\x62\x61\x63kIngestionService\x12j\n\x0fPublishFeedback\x12*.feedback_ingestion.PublishFeedbackRequest\x1a+.feedback_ingestion.PublishFeedbackResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -22,11 +22,11 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'feedback_ingestion_pb2', _g
 if _descriptor._USE_C_DESCRIPTORS == False:
   DESCRIPTOR._options = None
   _globals['_ANALYSISPAYLOAD']._serialized_start=49
-  _globals['_ANALYSISPAYLOAD']._serialized_end=192
-  _globals['_PUBLISHFEEDBACKREQUEST']._serialized_start=195
-  _globals['_PUBLISHFEEDBACKREQUEST']._serialized_end=566
-  _globals['_PUBLISHFEEDBACKRESPONSE']._serialized_start=568
-  _globals['_PUBLISHFEEDBACKRESPONSE']._serialized_end=649
-  _globals['_FEEDBACKINGESTIONSERVICE']._serialized_start=652
-  _globals['_FEEDBACKINGESTIONSERVICE']._serialized_end=786
+  _globals['_ANALYSISPAYLOAD']._serialized_end=220
+  _globals['_PUBLISHFEEDBACKREQUEST']._serialized_start=223
+  _globals['_PUBLISHFEEDBACKREQUEST']._serialized_end=594
+  _globals['_PUBLISHFEEDBACKRESPONSE']._serialized_start=596
+  _globals['_PUBLISHFEEDBACKRESPONSE']._serialized_end=677
+  _globals['_FEEDBACKINGESTIONSERVICE']._serialized_start=680
+  _globals['_FEEDBACKINGESTIONSERVICE']._serialized_end=814
 # @@protoc_insertion_point(module_scope)
