@@ -21,6 +21,8 @@ class Settings:
     backend_http_base_url: Optional[str] = None
     service_bootstrap_key: Optional[str] = None
     service_token_mint_ttl_seconds: int = 3600
+    service_token_mint_retries: int = 4
+    service_token_mint_backoff_seconds: float = 1.0
     storage_dir: str = '/app/storage'
     audio_buffer_window_seconds: float = 10.0
     audio_buffer_min_window_seconds: float = 4.0
@@ -105,6 +107,14 @@ class Settings:
                     3600,
                     int(os.getenv('SERVICE_TOKEN_MINT_TTL_SECONDS', '3600')),
                 ),
+            ),
+            service_token_mint_retries=max(
+                1,
+                int(os.getenv('SERVICE_TOKEN_MINT_RETRIES', '4')),
+            ),
+            service_token_mint_backoff_seconds=max(
+                0.0,
+                float(os.getenv('SERVICE_TOKEN_MINT_BACKOFF_SECONDS', '1.0')),
             ),
             storage_dir=os.getenv('STORAGE_DIR', '/app/storage'),
             audio_buffer_window_seconds=float(
@@ -222,6 +232,15 @@ class Settings:
                     'Set BACKEND_SERVICE_TOKEN, or set SERVICE_BOOTSTRAP_KEY + '
                     'BACKEND_HTTP_BASE_URL for '
                     'automatic renewal.',
+                )
+            if self.service_token_mint_retries < 1:
+                raise ValueError(
+                    f'Invalid SERVICE_TOKEN_MINT_RETRIES: {self.service_token_mint_retries}',
+                )
+            if self.service_token_mint_backoff_seconds < 0:
+                raise ValueError(
+                    'Invalid SERVICE_TOKEN_MINT_BACKOFF_SECONDS: '
+                    f'{self.service_token_mint_backoff_seconds}',
                 )
         if self.audio_buffer_window_seconds <= 0:
             raise ValueError(

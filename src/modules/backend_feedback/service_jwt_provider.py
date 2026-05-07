@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 # Refresh before wall-clock expiry so calls rarely hit "jwt expired" on the wire.
 _DEFAULT_REFRESH_SKEW_SECONDS = 120
+_DEFAULT_MINT_RETRIES = 4
+_DEFAULT_MINT_BACKOFF_SECONDS = 1.0
 
 
 class ServiceJwtProvider:
@@ -25,12 +27,16 @@ class ServiceJwtProvider:
         *,
         ttl_seconds: int = 3600,
         refresh_skew_seconds: int = _DEFAULT_REFRESH_SKEW_SECONDS,
+        mint_retries: int = _DEFAULT_MINT_RETRIES,
+        mint_backoff_seconds: float = _DEFAULT_MINT_BACKOFF_SECONDS,
         session: Optional[requests.Session] = None,
     ) -> None:
         self._http_base = http_base_url.rstrip('/')
         self._bootstrap_key = bootstrap_key.strip()
         self._ttl_seconds = ttl_seconds
         self._skew = refresh_skew_seconds
+        self._mint_retries = max(1, mint_retries)
+        self._mint_backoff_seconds = max(0.0, mint_backoff_seconds)
         self._session = session or requests.Session()
         self._lock = threading.Lock()
         self._token: Optional[str] = None
@@ -43,7 +49,15 @@ class ServiceJwtProvider:
 
     def prewarm(self) -> None:
         """Mint immediately so misconfiguration fails at startup, not on first publish."""
-        self.get_token()
+        try:
+            self.get_token()
+        except requests.RequestException as exc:
+            logger.warning(
+                'SERVICE JWT prewarm failed; service will retry on demand | %s',
+                exc,
+            )
+        except Exception:
+            logger.exception('SERVICE JWT prewarm failed with unexpected error')
 
     def get_token(self) -> str:
         """Return a valid JWT, minting or refreshing when near expiry."""
@@ -57,22 +71,43 @@ class ServiceJwtProvider:
 
     def _mint_locked(self) -> None:
         url = f'{self._http_base}/auth/service-token'
-        try:
-            resp = self._session.post(
-                url,
-                headers={
-                    'Content-Type': 'application/json',
-                    'x-service-bootstrap-key': self._bootstrap_key,
-                },
-                json={
-                    'label': 'python-audio-pipeline',
-                    'ttlSeconds': self._ttl_seconds,
-                },
-                timeout=15.0,
-            )
-        except requests.RequestException as exc:
-            logger.error('service-token mint HTTP failed | url=%s | %s', url, exc)
-            raise
+        resp: Any | None = None
+        last_exc: Exception | None = None
+        for attempt in range(1, self._mint_retries + 1):
+            try:
+                resp = self._session.post(
+                    url,
+                    headers={
+                        'Content-Type': 'application/json',
+                        'x-service-bootstrap-key': self._bootstrap_key,
+                    },
+                    json={
+                        'label': 'python-audio-pipeline',
+                        'ttlSeconds': self._ttl_seconds,
+                    },
+                    timeout=15.0,
+                )
+                break
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt >= self._mint_retries:
+                    logger.error('service-token mint HTTP failed | url=%s | %s', url, exc)
+                    raise
+                backoff_s = self._mint_backoff_seconds * (2 ** (attempt - 1))
+                logger.warning(
+                    'service-token mint attempt %s/%s failed; retrying in %.1fs | %s',
+                    attempt,
+                    self._mint_retries,
+                    backoff_s,
+                    exc,
+                )
+                if backoff_s > 0:
+                    time.sleep(backoff_s)
+
+        if resp is None:
+            if last_exc is not None:
+                raise last_exc
+            raise RuntimeError('service-token mint failed without response')
 
         if not resp.ok:
             body_preview = (resp.text or '')[:500]
