@@ -18,6 +18,7 @@ from .llm_logger import log_llm_interaction, log_llm_state_change
 from .rule_based_analyzer import analyze_text_fallback
 from .types import TextAnalysisResult, TranscriptionChunk
 from ...config.settings import get_settings
+from ...feedback_trace import log_feedback_trace, make_feedback_trace_id
 from ...metrics.realtime_metrics import (
     LLM_CALLS_TOTAL,
     LLM_CALL_ERRORS_TOTAL,
@@ -424,6 +425,11 @@ class TextAnalysisService:
         direct_feedback = analysis_result.get('direct_feedback', '')
         confidence = analysis_result.get('confidence', 0.5)
         feedback_type = analysis_result.get('feedback_type')
+        trace_id = make_feedback_trace_id(
+            chunk.meeting_id,
+            chunk.participant_id,
+            chunk.window_end_ms,
+        )
 
         LLM_CONFIDENCE_SCORE.observe(confidence)
 
@@ -433,6 +439,19 @@ class TextAnalysisService:
             logger.debug(
                 "Suppressing low-confidence feedback (%.2f): %s",
                 confidence, direct_feedback[:50],
+            )
+            log_feedback_trace(
+                logger,
+                logging.INFO,
+                'python.llm_suppressed',
+                trace_id=trace_id,
+                meeting_id=chunk.meeting_id,
+                participant_id=chunk.participant_id,
+                window_end_ms=chunk.window_end_ms,
+                extra={
+                    'outputConfidence': round(float(confidence or 0.0), 3),
+                    'feedbackPreview': (direct_feedback or '')[:80],
+                },
             )
             direct_feedback = ''
             feedback_type = None
@@ -514,6 +533,20 @@ class TextAnalysisService:
             LLM_CALL_DURATION_MS.observe(llm_duration_ms)
             LLM_CALL_ERRORS_TOTAL.inc()
             LLM_FALLBACK_ACTIVATED_TOTAL.inc()
+            log_feedback_trace(
+                logger,
+                logging.WARNING,
+                'python.llm_quota_fallback',
+                trace_id=make_feedback_trace_id(
+                    chunk.meeting_id,
+                    chunk.participant_id,
+                    chunk.window_end_ms,
+                ),
+                meeting_id=chunk.meeting_id,
+                participant_id=chunk.participant_id,
+                window_end_ms=chunk.window_end_ms,
+                extra={'reason': str(e)},
+            )
             logger.warning("Gemini API quota exhausted (%s), using rule-based fallback", e)
             try:
                 return analyze_text_fallback(chunk.text, current_state).to_dict()
@@ -526,6 +559,20 @@ class TextAnalysisService:
             LLM_CALL_DURATION_MS.observe(llm_duration_ms)
             LLM_CALL_ERRORS_TOTAL.inc()
             LLM_FALLBACK_ACTIVATED_TOTAL.inc()
+            log_feedback_trace(
+                logger,
+                logging.WARNING,
+                'python.llm_error_fallback',
+                trace_id=make_feedback_trace_id(
+                    chunk.meeting_id,
+                    chunk.participant_id,
+                    chunk.window_end_ms,
+                ),
+                meeting_id=chunk.meeting_id,
+                participant_id=chunk.participant_id,
+                window_end_ms=chunk.window_end_ms,
+                extra={'reason': str(e)},
+            )
             logger.warning("Gemini LLM failed (%s), using rule-based fallback", e)
             try:
                 return analyze_text_fallback(chunk.text, current_state).to_dict()

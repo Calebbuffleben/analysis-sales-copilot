@@ -197,8 +197,15 @@ class Settings:
         return value or None
 
     def grpc_feedback_wants_auto_jwt(self) -> bool:
-        """True when env requests automatic SERVICE JWT mint/refresh via HTTP bootstrap."""
+        """True when env requests automatic SERVICE JWT mint/refresh via HTTP bootstrap.
+
+        Static BACKEND_SERVICE_TOKEN has precedence. If a static token is present,
+        we avoid auto-mint so transient backend HTTP issues do not block publishes.
+        """
+        has_static = bool((self.grpc_feedback_service_token or '').strip())
         return bool(
+            not has_static
+            and
             self.backend_http_base_url
             and self.service_bootstrap_key,
         )
@@ -219,7 +226,7 @@ class Settings:
             mint_partial = (
                 bool((self.service_bootstrap_key or '').strip())
                 or bool((self.backend_http_base_url or '').strip())
-            ) and not wants_mint
+            ) and not wants_mint and not has_static
             if mint_partial:
                 raise ValueError(
                     'Incomplete automatic service JWT config: set all of '
