@@ -137,6 +137,40 @@ def test_publish_refuses_empty_tenant_id() -> None:
     assert client._stub.PublishFeedback.call_count == 0  # type: ignore[attr-defined]
 
 
+def test_publish_sets_playbook_hint_json_on_analysis_payload() -> None:
+    client = BackendFeedbackClient(
+        service_url='localhost:50052',
+        enabled=True,
+        service_token='svc-token-123',
+    )
+    hint = '{"playbook_template_key":"preco","playbook_variables":{"x":"y"}}'
+    event = BackendFeedbackEvent(
+        meeting_id='m1',
+        participant_id='p1',
+        participant_name=None,
+        participant_role=None,
+        feedback_type='text_analysis_ingress',
+        severity='info',
+        ts_ms=0,
+        window_start_ms=0,
+        window_end_ms=1000,
+        message='hello',
+        transcript_text='transcript',
+        transcript_confidence=0.9,
+        analysis=TextAnalysisResult(
+            direct_feedback='fb',
+            conversation_state_json='{}',
+            playbook_hint_json=hint,
+        ),
+        tenant_id='tenant-42',
+    )
+    client.publish_feedback(event)
+    call = client._stub.PublishFeedback.call_args  # type: ignore[attr-defined]
+    req = call[0][0] if call[0] else call.kwargs.get('request')
+    assert req is not None
+    assert req.analysis.playbook_hint_json == hint
+
+
 def test_disabled_client_does_not_call_stub() -> None:
     client = BackendFeedbackClient(
         service_url='localhost:50052',

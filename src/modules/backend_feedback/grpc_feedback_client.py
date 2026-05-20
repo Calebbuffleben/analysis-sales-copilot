@@ -91,6 +91,9 @@ class BackendFeedbackClient:
             request.analysis.speech_count = analysis.speech_count
         if analysis.mean_rms_dbfs is not None:
             request.analysis.mean_rms_dbfs = analysis.mean_rms_dbfs
+        hint = (analysis.playbook_hint_json or '').strip()
+        if hint:
+            request.analysis.playbook_hint_json = hint
 
         logger.info(
             '[Step 6] Enviando feedback gerado pelo Gemini via gRPC para o backend',

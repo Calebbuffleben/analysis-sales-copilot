@@ -37,6 +37,41 @@ from ..utils.proto_utils import (
 logger = logging.getLogger(__name__)
 
 
+class _ServerRuntime:
+    """Holds runtime-managed resources for graceful shutdown."""
+
+    def __init__(
+        self,
+        text_analysis_service: TextAnalysisService,
+        publish_dispatcher: PublishDispatcher,
+        backend_feedback_client: BackendFeedbackClient,
+    ) -> None:
+        self.text_analysis_service = text_analysis_service
+        self.publish_dispatcher = publish_dispatcher
+        self.backend_feedback_client = backend_feedback_client
+        self._closed = False
+
+    def shutdown(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+
+        try:
+            self.text_analysis_service.shutdown()
+        except Exception:
+            logger.exception('Failed to shutdown text analysis service')
+
+        try:
+            self.publish_dispatcher.shutdown(wait=True)
+        except Exception:
+            logger.exception('Failed to shutdown publish dispatcher')
+
+        try:
+            self.backend_feedback_client.close()
+        except Exception:
+            logger.exception('Failed to close backend feedback client')
+
+
 def validate_proto_code(proto_dir: Optional[str] = None) -> bool:
     """
     Validate that proto code has been generated.
@@ -173,6 +208,8 @@ def create_server(config: Settings) -> grpc.Server:
             http_base_url=config.backend_http_base_url,
             bootstrap_key=config.service_bootstrap_key,
             ttl_seconds=config.service_token_mint_ttl_seconds,
+            mint_retries=config.service_token_mint_retries,
+            mint_backoff_seconds=config.service_token_mint_backoff_seconds,
         )
         service_jwt_provider.prewarm()
 
@@ -260,6 +297,17 @@ def create_server(config: Settings) -> grpc.Server:
         _warmup_ml_models(transcription_service, text_analysis_service)
     else:
         logger.info('PRELOAD_ML_MODELS=false — models load on first use')
+
+    # Attach runtime resources required for graceful shutdown.
+    setattr(
+        server,
+        '_audio_pipeline_runtime',
+        _ServerRuntime(
+            text_analysis_service=text_analysis_service,
+            publish_dispatcher=publish_dispatcher,
+            backend_feedback_client=backend_feedback_client,
+        ),
+    )
     return server
 
 
@@ -271,10 +319,16 @@ def start_server(server: grpc.Server, config: Settings) -> None:
         server: gRPC server instance
         config: Application settings
     """
+    runtime = getattr(server, '_audio_pipeline_runtime', None)
+
+    def _shutdown_runtime() -> None:
+        if runtime is not None:
+            runtime.shutdown()
+
     # Setup signal handlers for graceful shutdown
     def signal_handler(signum, frame):
         logger.info(f"Recebido sinal {signum}, encerrando servidor...")
-        text_analysis_service.shutdown()
+        _shutdown_runtime()
         server.stop(0)
         sys.exit(0)
 
@@ -293,5 +347,5 @@ def start_server(server: grpc.Server, config: Settings) -> None:
         server.wait_for_termination()
     except KeyboardInterrupt:
         logger.info("🛑 Servidor encerrado pelo usuário")
-        text_analysis_service.shutdown()
+        _shutdown_runtime()
         server.stop(0)

@@ -4,9 +4,9 @@ import pytest
 from src.modules.text_analysis.llm_state_validator import (
     ConversationState,
     LLMAnalysisResult,
+    build_playbook_hint_json,
     validate_conversation_state,
     validate_llm_response,
-    VALID_OBJECTION_CATEGORIES,
 )
 
 
@@ -198,6 +198,39 @@ class TestLLMAnalysisResult:
         assert result.confidence == 0.5  # default
         assert result.feedback_type is None
         assert isinstance(result.estado, ConversationState)
+        assert result.playbook_template_key is None
+        assert result.playbook_variables == {}
+
+    def test_playbook_hint_aliases_and_normalization(self):
+        """Alternate JSON keys and variable coercion."""
+        raw = {
+            "feedback": "x",
+            "confidence": 0.9,
+            "template_key": "  my_template  ",
+            "variables": {"competidor": "Acme", "n": 42},
+            "estado": {},
+        }
+        r = validate_llm_response(raw)
+        assert r.playbook_template_key == "my_template"
+        assert r.playbook_variables["competidor"] == "Acme"
+        assert r.playbook_variables["n"] == "42"
+        assert "playbook_template_key" in r.playbook_hint_json
+        assert "Acme" in r.playbook_hint_json
+
+    def test_playbook_key_truncation(self):
+        long_key = "a" * 100
+        raw = {
+            "feedback": "x",
+            "playbook_template_key": long_key,
+            "playbook_variables": {},
+            "estado": {},
+        }
+        r = validate_llm_response(raw)
+        assert r.playbook_template_key == "a" * 64
+
+    def test_build_playbook_hint_json_empty_without_key(self):
+        assert build_playbook_hint_json(None, {"a": "b"}) == ""
+        assert build_playbook_hint_json("", {}) == ""
 
     def test_validate_llm_response_with_invalid_estado(self):
         """Test validation with invalid estado."""

@@ -12,6 +12,8 @@ message AnalysisPayload {
   int32 samples_count = 3;
   int32 speech_count = 4;
   float mean_rms_dbfs = 5;
+  // JSON: { "playbook_template_key", "playbook_variables", ... } per backend contract
+  string playbook_hint_json = 6;
 }
 
 message PublishFeedbackRequest {

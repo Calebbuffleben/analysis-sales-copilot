@@ -143,7 +143,9 @@ class OllamaAnalyzer:
                 'direct_feedback': validated.direct_feedback,
                 'confidence': validated.confidence,
                 'feedback_type': validated.feedback_type,
-                'conversation_state': validated.estado.to_dict()
+                'conversation_state': validated.estado.to_dict(),
+                'playbook_template_key': validated.playbook_template_key,
+                'playbook_variables': dict(validated.playbook_variables),
             }
 
         except requests.exceptions.ConnectionError as e:
@@ -179,7 +181,9 @@ class OllamaAnalyzer:
             'direct_feedback': '',
             'confidence': 0.0,
             'feedback_type': None,
-            'conversation_state': state
+            'conversation_state': state,
+            'playbook_template_key': None,
+            'playbook_variables': {},
         }
 
     def _build_prompt(self, text: str, state: Dict[str, Any]) -> str:
@@ -203,6 +207,8 @@ Respond ONLY with a valid JSON object in this exact format:
   "feedback": "Short tactical feedback (1-2 sentences) or null if no intervention needed",
   "confidence": 0.85,
   "feedback_type": "objection|opportunity|rapport|closing|clarification|risk|null",
+  "playbook_template_key": null,
+  "playbook_variables": {{}},
   "estado": {{
     "interesse": "baixo|medio|alto",
     "resistencia": "baixa|media|alta",
@@ -210,6 +216,8 @@ Respond ONLY with a valid JSON object in this exact format:
     "engajamento": "baixo|medio|alto"
   }}
 }}
+
+Optional: when a tenant playbook template clearly applies, set playbook_template_key (short slug, max 64 chars) and playbook_variables (object of strings for {{placeholder}} substitution). Otherwise omit or use null/empty object.
 
 Valid objection categories: preco, concorrente, tempo, confianca, funcionalidade, contrato, implementacao, roi
 Valid feedback types: objection, opportunity, rapport, closing, clarification, risk
