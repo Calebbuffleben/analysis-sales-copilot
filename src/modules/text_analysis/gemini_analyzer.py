@@ -355,7 +355,7 @@ Resposta esperada (note `playbook_template_key` e `playbook_variables` na raiz):
 
 Quando um **roteiro acionável** cadastrado no tenant claramente se aplica ao trecho (ex.: objeção de preço → template `preco`), inclua no objeto raiz:
 - `playbook_template_key`: string curta (slug do template, máx. 64 caracteres). Omita ou use `null` se não houver template aplicável.
-- `playbook_variables`: objeto com strings para interpolar placeholders nos passos do template (ex.: `{"competidor": "Concorrente X", "produto": "Suite Pro"}`). No máximo ~32 chaves; valores curtos.
+- `playbook_variables`: objeto com strings para interpolar placeholders nos passos do template (ex.: `{{"competidor": "Concorrente X", "produto": "Suite Pro"}}`). No máximo ~32 chaves; valores curtos.
 
 Se não tiver certeza, omita ambos ou use `null`.
 
