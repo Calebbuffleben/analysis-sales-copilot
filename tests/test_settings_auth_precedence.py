@@ -23,3 +23,28 @@ def test_auto_jwt_enabled_when_no_static_token() -> None:
 
     assert settings.grpc_feedback_wants_auto_jwt() is True
     settings.validate()
+
+
+def test_assemblyai_provider_requires_api_key() -> None:
+    settings = Settings(
+        grpc_feedback_enabled=False,
+        stt_provider='assemblyai',
+        assemblyai_api_key=None,
+    )
+
+    try:
+        settings.validate()
+    except ValueError as exc:
+        assert 'ASSEMBLYAI_API_KEY' in str(exc)
+    else:
+        raise AssertionError('Expected missing AssemblyAI API key to fail validation')
+
+
+def test_assemblyai_provider_validates_with_api_key() -> None:
+    settings = Settings(
+        grpc_feedback_enabled=False,
+        stt_provider='assemblyai',
+        assemblyai_api_key='test-key',
+    )
+
+    settings.validate()

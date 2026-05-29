@@ -4,6 +4,9 @@ import logging
 from typing import Optional
 
 from ..modules.audio_buffer.service import AudioBufferService
+from ..modules.transcription.assemblyai_streaming_provider import (
+    AssemblyAiStreamingProvider,
+)
 from .stream_service import StreamService, StreamStats
 
 logger = logging.getLogger(__name__)
@@ -16,6 +19,7 @@ class AudioService:
         self,
         stream_service: Optional[StreamService] = None,
         audio_buffer_service: Optional[AudioBufferService] = None,
+        streaming_stt_provider: Optional[AssemblyAiStreamingProvider] = None,
     ):
         """
         Initialize the audio service.
@@ -25,6 +29,7 @@ class AudioService:
         """
         self.stream_service = stream_service or StreamService()
         self.audio_buffer_service = audio_buffer_service
+        self.streaming_stt_provider = streaming_stt_provider
         # TODO: Inject here, via dependency injection or factory:
         # - SlidingWindowWorker: já encapsulado dentro de AudioBufferService.
         # - TranscriptionPipelineService: serviço de nível mais alto que registra
@@ -118,6 +123,29 @@ class AudioService:
                 sequence=sequence,
                 tenant_id=tenant_id,
             )
+        if self.streaming_stt_provider and stats:
+            try:
+                self.streaming_stt_provider.send_audio(
+                    stats.key,
+                    wav_data,
+                    {
+                        'stream_key': stats.key,
+                        'meeting_id': meeting_id,
+                        'participant_id': participant_id,
+                        'track': track,
+                        'sample_rate': stats.sample_rate,
+                        'channels': stats.channels,
+                        'timestamp_ms': timestamp_ms,
+                        'sequence': sequence,
+                        'tenant_id': tenant_id,
+                    },
+                )
+            except Exception as exc:
+                logger.exception(
+                    'AssemblyAI streaming send failed | stream_key=%s | error=%s',
+                    stats.key,
+                    exc,
+                )
 
     def end_stream(
         self,
@@ -137,6 +165,8 @@ class AudioService:
             Final StreamStats if stream existed, None otherwise
         """
         stream_key = f"{meeting_id}:{participant_id}:{track}"
+        if self.streaming_stt_provider:
+            self.streaming_stt_provider.end_stream(stream_key)
         if self.audio_buffer_service:
             self.audio_buffer_service.end_stream(stream_key)
 
