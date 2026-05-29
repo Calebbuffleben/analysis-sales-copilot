@@ -31,7 +31,7 @@ class TranscriptionPipelineService:
 
     def __init__(
         self,
-        transcription_service: TranscriptionService,
+        transcription_service: Optional[TranscriptionService],
         text_analysis_service: TextAnalysisService,
         publish_dispatcher: PublishDispatcher,
         default_language: Optional[str] = None,
@@ -59,6 +59,12 @@ class TranscriptionPipelineService:
         meta: dict,
     ) -> None:
         """Process one ready window: STT, analysis, publish."""
+        if self._transcription_service is None:
+            logger.debug(
+                'Ignoring ready window because local STT is disabled | stream_key=%s',
+                stream_key,
+            )
+            return
         t_pipeline_start = time.perf_counter()
         t_wall_pipeline_start_ms = int(time.time() * 1000)
         logger.info(f"[Step 1] Início do processamento da janela de áudio (stream={stream_key})")
@@ -190,6 +196,80 @@ class TranscriptionPipelineService:
             },
         )
 
+    def process_transcript(
+        self,
+        stream_key: str,
+        chunk: TranscriptionChunk,
+        audio_stats: Optional[dict[str, object]] = None,
+    ) -> None:
+        """Process a finalized streaming transcript from a cloud STT provider."""
+        if not chunk.text.strip():
+            WINDOW_SKIPPED_EMPTY_TOTAL.inc()
+            logger.debug(
+                '⏭️ Pipeline skip (empty streaming transcript) | stream_key=%s',
+                stream_key,
+            )
+            return
+
+        t_pipeline_start = time.perf_counter()
+        t_wall_pipeline_start_ms = int(time.time() * 1000)
+        window_end_to_pipeline_start_ms = max(
+            0,
+            t_wall_pipeline_start_ms - int(chunk.window_end_ms or 0),
+        )
+        WINDOW_END_TO_PIPELINE_START_MS.observe(
+            float(window_end_to_pipeline_start_ms),
+        )
+
+        logger.info(
+            "[Step 2] Streaming transcript finalized: '%s'",
+            chunk.text,
+        )
+        logger.info("[Step 3] Enviando transcrição para análise do Gemini")
+        t_ana_start = time.perf_counter()
+        analysis = self._text_analysis_service.analyze(chunk)
+        self._apply_streaming_audio_stats(analysis, audio_stats or {})
+        t_ana_end = time.perf_counter()
+        ANALYSIS_MS.observe((t_ana_end - t_ana_start) * 1000.0)
+
+        t_pub_start = time.perf_counter()
+        published_enqueued = self._handle_transcript(stream_key, chunk, analysis)
+        t_pub_end = time.perf_counter()
+
+        if published_enqueued:
+            WINDOW_PROCESSED_TOTAL.inc()
+
+        PIPELINE_TOTAL_MS.observe((t_pub_end - t_pipeline_start) * 1000.0)
+        analysis_ms = (t_ana_end - t_ana_start) * 1000.0
+        enqueue_ms = (t_pub_end - t_pub_start) * 1000.0
+        total_ms = (t_pub_end - t_pipeline_start) * 1000.0
+        tid = make_feedback_trace_id(
+            chunk.meeting_id,
+            chunk.participant_id,
+            chunk.window_end_ms,
+        )
+        log_feedback_trace(
+            logger,
+            logging.INFO,
+            'python.pipeline',
+            trace_id=tid,
+            meeting_id=chunk.meeting_id,
+            participant_id=chunk.participant_id,
+            window_end_ms=chunk.window_end_ms,
+            extra={
+                'streamKey': stream_key,
+                'provider': 'assemblyai',
+                'windowEndToPipelineStartMs': window_end_to_pipeline_start_ms,
+                'publishEnqueued': published_enqueued,
+                'sttMs': 0.0,
+                'analysisMs': round(analysis_ms, 1),
+                'enqueueMs': round(enqueue_ms, 1),
+                'totalMs': round(total_ms, 1),
+                'hasDirectFeedback': bool(analysis.direct_feedback),
+                'transcriptChars': len(chunk.text or ''),
+            },
+        )
+
     def _handle_transcript(
         self,
         stream_key: str,
@@ -249,6 +329,22 @@ class TranscriptionPipelineService:
         analysis.speech_count = int(stats.get('speech_count') or 0)
         mean = stats.get('mean_rms_dbfs')
         analysis.mean_rms_dbfs = mean if mean is None else float(mean)
+
+    def _apply_streaming_audio_stats(
+        self,
+        analysis: TextAnalysisResult,
+        audio_stats: dict[str, object],
+    ) -> None:
+        """Attach provider-side audio stats to the analysis payload."""
+        samples = audio_stats.get('samples_count')
+        speech = audio_stats.get('speech_count')
+        mean = audio_stats.get('mean_rms_dbfs')
+        if samples is not None:
+            analysis.samples_count = int(samples)
+        if speech is not None:
+            analysis.speech_count = int(speech)
+        if mean is not None:
+            analysis.mean_rms_dbfs = float(mean)
 
     def _normalize_language(self, language: Optional[object]) -> Optional[str]:
         if language is None:

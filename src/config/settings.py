@@ -34,6 +34,24 @@ class Settings:
     whisper_empty_diagnostic_no_vad: bool = False
     whisper_low_energy_dbfs: float = -50.0
     whisper_default_language: Optional[str] = None
+    # STT provider: `assemblyai` is the streaming cloud provider; `local` keeps
+    # the legacy faster-whisper path available during rollout.
+    stt_provider: str = 'local'
+    assemblyai_api_key: Optional[str] = None
+    assemblyai_api_host: str = 'streaming.assemblyai.com'
+    assemblyai_speech_model: str = 'u3-rt-pro'
+    assemblyai_sample_rate: int = 16000
+    assemblyai_format_turns: bool = True
+    assemblyai_continuous_partials: bool = False
+    assemblyai_stream_idle_timeout_ms: int = 30_000
+    assemblyai_reconnect_limit: int = 2
+    assemblyai_connect_timeout_seconds: float = 10.0
+    assemblyai_termination_timeout_seconds: float = 2.0
+    assemblyai_end_of_turn_confidence_threshold: Optional[float] = None
+    assemblyai_min_turn_silence_ms: Optional[int] = None
+    assemblyai_max_turn_silence_ms: Optional[int] = None
+    assemblyai_vad_threshold: Optional[float] = None
+    assemblyai_keyterms_prompt: Optional[str] = None
     # STT process parallelism (Phase 5): 0 = in-process + lock; N>=1 = N worker processes,
     # each with its own WhisperModel (true parallel transcribe).
     stt_process_workers: int = 0
@@ -145,6 +163,54 @@ class Settings:
             whisper_default_language=cls._normalize_language(
                 os.getenv('WHISPER_DEFAULT_LANGUAGE'),
             ),
+            stt_provider=os.getenv('STT_PROVIDER', 'assemblyai').strip().lower(),
+            assemblyai_api_key=(os.getenv('ASSEMBLYAI_API_KEY') or '').strip() or None,
+            assemblyai_api_host=os.getenv(
+                'ASSEMBLYAI_API_HOST',
+                'streaming.assemblyai.com',
+            ).strip() or 'streaming.assemblyai.com',
+            assemblyai_speech_model=os.getenv(
+                'ASSEMBLYAI_SPEECH_MODEL',
+                'u3-rt-pro',
+            ).strip() or 'u3-rt-pro',
+            assemblyai_sample_rate=int(os.getenv('ASSEMBLYAI_SAMPLE_RATE', '16000')),
+            assemblyai_format_turns=os.getenv(
+                'ASSEMBLYAI_FORMAT_TURNS',
+                'true',
+            ).lower()
+            == 'true',
+            assemblyai_continuous_partials=os.getenv(
+                'ASSEMBLYAI_CONTINUOUS_PARTIALS',
+                'false',
+            ).lower()
+            == 'true',
+            assemblyai_stream_idle_timeout_ms=int(
+                os.getenv('ASSEMBLYAI_STREAM_IDLE_TIMEOUT_MS', '30000'),
+            ),
+            assemblyai_reconnect_limit=int(
+                os.getenv('ASSEMBLYAI_RECONNECT_LIMIT', '2'),
+            ),
+            assemblyai_connect_timeout_seconds=float(
+                os.getenv('ASSEMBLYAI_CONNECT_TIMEOUT_SECONDS', '10.0'),
+            ),
+            assemblyai_termination_timeout_seconds=float(
+                os.getenv('ASSEMBLYAI_TERMINATION_TIMEOUT_SECONDS', '2.0'),
+            ),
+            assemblyai_end_of_turn_confidence_threshold=cls._optional_float(
+                os.getenv('ASSEMBLYAI_END_OF_TURN_CONFIDENCE_THRESHOLD'),
+            ),
+            assemblyai_min_turn_silence_ms=cls._optional_int(
+                os.getenv('ASSEMBLYAI_MIN_TURN_SILENCE_MS'),
+            ),
+            assemblyai_max_turn_silence_ms=cls._optional_int(
+                os.getenv('ASSEMBLYAI_MAX_TURN_SILENCE_MS'),
+            ),
+            assemblyai_vad_threshold=cls._optional_float(
+                os.getenv('ASSEMBLYAI_VAD_THRESHOLD'),
+            ),
+            assemblyai_keyterms_prompt=(
+                (os.getenv('ASSEMBLYAI_KEYTERMS_PROMPT') or '').strip() or None
+            ),
             stt_process_workers=int(os.getenv('STT_PROCESS_WORKERS', '0')),
             window_queue_max_size=int(os.getenv('WINDOW_QUEUE_MAX_SIZE', '8')),
             window_worker_threads=int(os.getenv('WINDOW_WORKER_THREADS', '2')),
@@ -195,6 +261,18 @@ class Settings:
             return None
         value = raw.strip().lower()
         return value or None
+
+    @staticmethod
+    def _optional_int(raw: Optional[str]) -> Optional[int]:
+        if raw is None or not raw.strip():
+            return None
+        return int(raw)
+
+    @staticmethod
+    def _optional_float(raw: Optional[str]) -> Optional[float]:
+        if raw is None or not raw.strip():
+            return None
+        return float(raw)
 
     def grpc_feedback_wants_auto_jwt(self) -> bool:
         """True when env requests automatic SERVICE JWT mint/refresh via HTTP bootstrap.
@@ -264,6 +342,54 @@ class Settings:
             )
         if not self.log_level.upper() in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']:
             raise ValueError(f'Invalid LOG_LEVEL: {self.log_level}')
+        if self.stt_provider not in {'assemblyai', 'local'}:
+            raise ValueError(
+                f'Invalid STT_PROVIDER: {self.stt_provider}. '
+                'Expected "assemblyai" or "local".',
+            )
+        if self.stt_provider == 'assemblyai':
+            if not (self.assemblyai_api_key or '').strip():
+                raise ValueError(
+                    'STT_PROVIDER=assemblyai requires ASSEMBLYAI_API_KEY.',
+                )
+            if self.assemblyai_sample_rate < 8000:
+                raise ValueError(
+                    f'Invalid ASSEMBLYAI_SAMPLE_RATE: {self.assemblyai_sample_rate}',
+                )
+            if self.assemblyai_stream_idle_timeout_ms < 1000:
+                raise ValueError(
+                    'Invalid ASSEMBLYAI_STREAM_IDLE_TIMEOUT_MS: '
+                    f'{self.assemblyai_stream_idle_timeout_ms}',
+                )
+            if self.assemblyai_reconnect_limit < 0:
+                raise ValueError(
+                    f'Invalid ASSEMBLYAI_RECONNECT_LIMIT: {self.assemblyai_reconnect_limit}',
+                )
+            if self.assemblyai_connect_timeout_seconds <= 0:
+                raise ValueError(
+                    'Invalid ASSEMBLYAI_CONNECT_TIMEOUT_SECONDS: '
+                    f'{self.assemblyai_connect_timeout_seconds}',
+                )
+            if self.assemblyai_termination_timeout_seconds < 0:
+                raise ValueError(
+                    'Invalid ASSEMBLYAI_TERMINATION_TIMEOUT_SECONDS: '
+                    f'{self.assemblyai_termination_timeout_seconds}',
+                )
+            if (
+                self.assemblyai_end_of_turn_confidence_threshold is not None
+                and not 0.0 <= self.assemblyai_end_of_turn_confidence_threshold <= 1.0
+            ):
+                raise ValueError(
+                    'Invalid ASSEMBLYAI_END_OF_TURN_CONFIDENCE_THRESHOLD: '
+                    f'{self.assemblyai_end_of_turn_confidence_threshold}',
+                )
+            if (
+                self.assemblyai_vad_threshold is not None
+                and not 0.0 <= self.assemblyai_vad_threshold <= 1.0
+            ):
+                raise ValueError(
+                    f'Invalid ASSEMBLYAI_VAD_THRESHOLD: {self.assemblyai_vad_threshold}',
+                )
         if not -120.0 <= self.whisper_low_energy_dbfs <= 0.0:
             raise ValueError(
                 f'Invalid WHISPER_LOW_ENERGY_DBFS: {self.whisper_low_energy_dbfs}',

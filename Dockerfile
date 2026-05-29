@@ -2,13 +2,9 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Instalar dependências do sistema
+# Instalar dependências do sistema mínimas para streaming/diagnóstico de áudio
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    ffmpeg \
-    libffi-dev \
-    libssl-dev \
-    pkg-config \
+    ca-certificates \
     libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 

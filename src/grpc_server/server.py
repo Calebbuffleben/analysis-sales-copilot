@@ -23,6 +23,10 @@ from ..modules.backend_feedback.grpc_feedback_client import BackendFeedbackClien
 from ..modules.backend_feedback.publish_dispatcher import PublishDispatcher
 from ..modules.backend_feedback.service_jwt_provider import ServiceJwtProvider
 from ..modules.text_analysis.text_analysis_service import TextAnalysisService
+from ..modules.transcription.assemblyai_streaming_provider import (
+    AssemblyAiStreamConfig,
+    AssemblyAiStreamingProvider,
+)
 from ..modules.transcription.ready_window_dispatcher import ReadyWindowDispatcher
 from ..modules.transcription.transcription_pipeline_service import (
     TranscriptionPipelineService,
@@ -45,10 +49,14 @@ class _ServerRuntime:
         text_analysis_service: TextAnalysisService,
         publish_dispatcher: PublishDispatcher,
         backend_feedback_client: BackendFeedbackClient,
+        transcription_service: Optional[TranscriptionService] = None,
+        streaming_stt_provider: Optional[AssemblyAiStreamingProvider] = None,
     ) -> None:
         self.text_analysis_service = text_analysis_service
         self.publish_dispatcher = publish_dispatcher
         self.backend_feedback_client = backend_feedback_client
+        self.transcription_service = transcription_service
+        self.streaming_stt_provider = streaming_stt_provider
         self._closed = False
 
     def shutdown(self) -> None:
@@ -70,6 +78,18 @@ class _ServerRuntime:
             self.backend_feedback_client.close()
         except Exception:
             logger.exception('Failed to close backend feedback client')
+
+        try:
+            if self.streaming_stt_provider is not None:
+                self.streaming_stt_provider.close_all()
+        except Exception:
+            logger.exception('Failed to close streaming STT provider')
+
+        try:
+            if self.transcription_service is not None:
+                self.transcription_service.shutdown()
+        except Exception:
+            logger.exception('Failed to shutdown transcription service')
 
 
 def validate_proto_code(proto_dir: Optional[str] = None) -> bool:
@@ -189,16 +209,6 @@ def create_server(config: Settings) -> grpc.Server:
         worker=sliding_window_worker,
         window_seconds=config.audio_buffer_window_seconds,
     )
-    transcription_service = TranscriptionService(
-        model_size=config.transcription_model_size,
-        device=config.transcription_device,
-        compute_type=config.transcription_compute_type,
-        vad_filter=config.whisper_vad_filter,
-        empty_diagnostic_no_vad=config.whisper_empty_diagnostic_no_vad,
-        low_energy_dbfs_threshold=config.whisper_low_energy_dbfs,
-        default_language=config.whisper_default_language,
-        process_workers=config.stt_process_workers,
-    )
     text_analysis_service = TextAnalysisService()
     service_jwt_provider: ServiceJwtProvider | None = None
     if config.grpc_feedback_enabled and config.grpc_feedback_wants_auto_jwt():
@@ -235,23 +245,66 @@ def create_server(config: Settings) -> grpc.Server:
     if get_settings().llm_provider != 'ollama':
         text_analysis_service._publish_dispatcher = publish_dispatcher
 
+    transcription_service: TranscriptionService | None = None
+    if config.stt_provider == 'local':
+        transcription_service = TranscriptionService(
+            model_size=config.transcription_model_size,
+            device=config.transcription_device,
+            compute_type=config.transcription_compute_type,
+            vad_filter=config.whisper_vad_filter,
+            empty_diagnostic_no_vad=config.whisper_empty_diagnostic_no_vad,
+            low_energy_dbfs_threshold=config.whisper_low_energy_dbfs,
+            default_language=config.whisper_default_language,
+            process_workers=config.stt_process_workers,
+        )
+
     transcription_pipeline_service = TranscriptionPipelineService(
         transcription_service=transcription_service,
         text_analysis_service=text_analysis_service,
         publish_dispatcher=publish_dispatcher,
         default_language=config.whisper_default_language,
     )
-    ready_window_dispatcher = ReadyWindowDispatcher(
-        transcription_pipeline_service.process_window,
-        max_queue_size=config.window_queue_max_size,
-        worker_threads=config.window_worker_threads,
-        max_age_ms=config.window_max_age_ms,
-        low_priority_speech_ratio_below=config.window_low_priority_speech_ratio_below,
+    streaming_stt_provider: AssemblyAiStreamingProvider | None = None
+    if config.stt_provider == 'assemblyai':
+        assert config.assemblyai_api_key
+        streaming_stt_provider = AssemblyAiStreamingProvider(
+            AssemblyAiStreamConfig(
+                api_key=config.assemblyai_api_key,
+                api_host=config.assemblyai_api_host,
+                speech_model=config.assemblyai_speech_model,
+                sample_rate=config.assemblyai_sample_rate,
+                format_turns=config.assemblyai_format_turns,
+                continuous_partials=config.assemblyai_continuous_partials,
+                stream_idle_timeout_ms=config.assemblyai_stream_idle_timeout_ms,
+                reconnect_limit=config.assemblyai_reconnect_limit,
+                connect_timeout_seconds=config.assemblyai_connect_timeout_seconds,
+                termination_timeout_seconds=config.assemblyai_termination_timeout_seconds,
+                end_of_turn_confidence_threshold=(
+                    config.assemblyai_end_of_turn_confidence_threshold
+                ),
+                min_turn_silence_ms=config.assemblyai_min_turn_silence_ms,
+                max_turn_silence_ms=config.assemblyai_max_turn_silence_ms,
+                vad_threshold=config.assemblyai_vad_threshold,
+                keyterms_prompt=config.assemblyai_keyterms_prompt,
+            ),
+            transcription_pipeline_service.process_transcript,
+        )
+    else:
+        ready_window_dispatcher = ReadyWindowDispatcher(
+            transcription_pipeline_service.process_window,
+            max_queue_size=config.window_queue_max_size,
+            worker_threads=config.window_worker_threads,
+            max_age_ms=config.window_max_age_ms,
+            low_priority_speech_ratio_below=config.window_low_priority_speech_ratio_below,
+        )
+        audio_buffer_service.register_window_callback(
+            lambda sk, pcm, meta: ready_window_dispatcher.enqueue(sk, pcm, meta),
+        )
+
+    audio_service = AudioService(
+        audio_buffer_service=audio_buffer_service,
+        streaming_stt_provider=streaming_stt_provider,
     )
-    audio_buffer_service.register_window_callback(
-        lambda sk, pcm, meta: ready_window_dispatcher.enqueue(sk, pcm, meta),
-    )
-    audio_service = AudioService(audio_buffer_service=audio_buffer_service)
     servicer = AudioPipelineServicer(audio_service)
 
     # Register servicer
@@ -261,16 +314,27 @@ def create_server(config: Settings) -> grpc.Server:
     )
 
     logger.info(f"Servidor gRPC criado com {config.grpc_workers} workers")
-    logger.info(
-        'STT config | STT_PROCESS_WORKERS=%s | WHISPER_VAD_FILTER=%s | '
-        'WHISPER_EMPTY_DIAGNOSTIC_NO_VAD=%s | WHISPER_LOW_ENERGY_DBFS=%s | '
-        'WHISPER_DEFAULT_LANGUAGE=%s',
-        config.stt_process_workers,
-        config.whisper_vad_filter,
-        config.whisper_empty_diagnostic_no_vad,
-        config.whisper_low_energy_dbfs,
-        config.whisper_default_language,
-    )
+    if config.stt_provider == 'assemblyai':
+        logger.info(
+            'STT config | provider=assemblyai | model=%s | api_host=%s | '
+            'sample_rate=%s | format_turns=%s | idle_timeout_ms=%s',
+            config.assemblyai_speech_model,
+            config.assemblyai_api_host,
+            config.assemblyai_sample_rate,
+            config.assemblyai_format_turns,
+            config.assemblyai_stream_idle_timeout_ms,
+        )
+    else:
+        logger.info(
+            'STT config | provider=local | STT_PROCESS_WORKERS=%s | '
+            'WHISPER_VAD_FILTER=%s | WHISPER_EMPTY_DIAGNOSTIC_NO_VAD=%s | '
+            'WHISPER_LOW_ENERGY_DBFS=%s | WHISPER_DEFAULT_LANGUAGE=%s',
+            config.stt_process_workers,
+            config.whisper_vad_filter,
+            config.whisper_empty_diagnostic_no_vad,
+            config.whisper_low_energy_dbfs,
+            config.whisper_default_language,
+        )
     logger.info('Gemini LLM Analyzer enabled')
     logger.info(
         'Window queue | WINDOW_QUEUE_MAX_SIZE=%s | WINDOW_WORKER_THREADS=%s | '
@@ -292,9 +356,11 @@ def create_server(config: Settings) -> grpc.Server:
         config.publish_max_age_ms,
     )
 
-    if config.preload_ml_models:
+    if config.preload_ml_models and transcription_service is not None:
         logger.info('PRELOAD_ML_MODELS=true — loading Whisper + embedding model...')
         _warmup_ml_models(transcription_service, text_analysis_service)
+    elif config.stt_provider == 'assemblyai':
+        logger.info('STT_PROVIDER=assemblyai — skipping local Whisper preload')
     else:
         logger.info('PRELOAD_ML_MODELS=false — models load on first use')
 
@@ -306,6 +372,8 @@ def create_server(config: Settings) -> grpc.Server:
             text_analysis_service=text_analysis_service,
             publish_dispatcher=publish_dispatcher,
             backend_feedback_client=backend_feedback_client,
+            transcription_service=transcription_service,
+            streaming_stt_provider=streaming_stt_provider,
         ),
     )
     return server

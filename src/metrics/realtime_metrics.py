@@ -99,7 +99,7 @@ WINDOW_END_TO_PIPELINE_START_MS = _metric_or_noop(
 STT_MS = _metric_or_noop(
     Histogram,
     'stt_ms',
-    'faster-whisper transcription time for a window (ms).',
+    'Local STT transcription time for a window (ms). Cloud streaming providers report their own metrics.',
     buckets=(50, 100, 250, 500, 800, 1200, 2000, 4000, 8000),
 )
 
@@ -166,6 +166,67 @@ WINDOW_SKIPPED_EMPTY_TOTAL = _metric_or_noop(
     Counter,
     'window_skipped_empty_total',
     'Total ready windows skipped because STT returned empty transcript.',
+)
+
+ASSEMBLYAI_SESSIONS_OPEN = _metric_or_noop(
+    Gauge,
+    'assemblyai_sessions_open',
+    'Current open AssemblyAI streaming sessions.',
+)
+
+ASSEMBLYAI_SESSIONS_STARTED_TOTAL = _metric_or_noop(
+    Counter,
+    'assemblyai_sessions_started_total',
+    'Total AssemblyAI streaming sessions started.',
+)
+
+ASSEMBLYAI_SESSIONS_TERMINATED_TOTAL = _metric_or_noop(
+    Counter,
+    'assemblyai_sessions_terminated_total',
+    'Total AssemblyAI streaming sessions terminated.',
+)
+
+ASSEMBLYAI_AUDIO_BYTES_SENT_TOTAL = _metric_or_noop(
+    Counter,
+    'assemblyai_audio_bytes_sent_total',
+    'Total PCM audio bytes sent to AssemblyAI streaming.',
+)
+
+ASSEMBLYAI_TURNS_TOTAL = _metric_or_noop(
+    Counter,
+    'assemblyai_turns_total',
+    'Total AssemblyAI turn events received.',
+)
+
+ASSEMBLYAI_FINAL_TURNS_TOTAL = _metric_or_noop(
+    Counter,
+    'assemblyai_final_turns_total',
+    'Total final AssemblyAI turns that reached end_of_turn.',
+)
+
+ASSEMBLYAI_EMPTY_TURNS_TOTAL = _metric_or_noop(
+    Counter,
+    'assemblyai_empty_turns_total',
+    'Total AssemblyAI final turns skipped because transcript was empty.',
+)
+
+ASSEMBLYAI_ERRORS_TOTAL = _metric_or_noop(
+    Counter,
+    'assemblyai_errors_total',
+    'Total AssemblyAI streaming provider errors.',
+)
+
+ASSEMBLYAI_RECONNECTS_TOTAL = _metric_or_noop(
+    Counter,
+    'assemblyai_reconnects_total',
+    'Total AssemblyAI stream reconnect attempts.',
+)
+
+ASSEMBLYAI_TURN_LATENCY_MS = _metric_or_noop(
+    Histogram,
+    'assemblyai_turn_latency_ms',
+    'Wall time from local turn audio end to AssemblyAI final turn handling (ms).',
+    buckets=(10, 25, 50, 100, 250, 500, 1000, 2000, 5000),
 )
 
 FEEDBACK_PUBLISH_ERRORS_TOTAL = _metric_or_noop(
