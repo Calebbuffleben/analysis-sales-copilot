@@ -13,6 +13,10 @@ from .llm_state_validator import (
 logger = logging.getLogger(__name__)
 
 
+class InvalidGeminiApiKeyError(Exception):
+    """Raised when the configured Gemini API key is rejected by the API."""
+
+
 class QuotaExhaustedError(Exception):
     """Raised when Gemini API quota is exhausted and we need to back off.
     
@@ -37,6 +41,7 @@ class GeminiAnalyzer:
         api_key: str,
         model_name: str = 'gemini-2.5-flash',
         client: Optional[Any] = None,
+        slot_index: Optional[int] = None,
     ):
         if client is None:
             if not api_key:
@@ -57,7 +62,9 @@ class GeminiAnalyzer:
 
         self.client = client
         self.model_name = model_name
-        
+        self._slot_index = slot_index
+        self._api_key_prefix = (api_key[:8] + '...') if len(api_key) > 8 else 'unset'
+
         # Quota protection: track consecutive 429 errors
         self._consecutive_429_errors = 0
         self._backoff_until_ms = 0  # Don't call API until this timestamp
@@ -129,7 +136,26 @@ class GeminiAnalyzer:
 
         except Exception as e:
             error_message = str(e)
-            
+
+            if (
+                'API_KEY_INVALID' in error_message
+                or 'API key not valid' in error_message
+                or (
+                    'INVALID_ARGUMENT' in error_message
+                    and 'API key' in error_message.lower()
+                )
+            ):
+                logger.error(
+                    'Gemini rejected API key | slot=%s | key_prefix=%s | '
+                    'If you have multiple keys, use GEMINI_API_KEYS=key1,key2 '
+                    '(not a comma-separated GEMINI_API_KEY).',
+                    self._slot_index,
+                    self._api_key_prefix,
+                )
+                raise InvalidGeminiApiKeyError(
+                    'Gemini API key is invalid for this slot',
+                ) from e
+
             # Detect 429 quota exceeded errors
             if '429' in error_message or 'ResourceExhausted' in error_message or 'quota' in error_message.lower():
                 self._consecutive_429_errors += 1

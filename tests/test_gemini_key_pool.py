@@ -16,7 +16,7 @@ class FakeAnalyzer:
         }
 
 
-def _fake_factory(key: str, model: str) -> FakeAnalyzer:
+def _fake_factory(key: str, model: str, index: int = 0) -> FakeAnalyzer:
     return FakeAnalyzer(key, model)
 
 
@@ -43,6 +43,19 @@ def test_single_gemini_api_key_is_backwards_compatible() -> None:
 
     assert len(pool.slots) == 1
     assert pool.slots[0].analyzer.key == 'single-key'
+
+
+def test_comma_separated_gemini_api_key_splits_into_slots() -> None:
+    settings = Settings(
+        gemini_api_key='key-a,key-b',
+        gemini_api_keys=(),
+        gemini_model='gemini-test',
+    )
+    pool = GeminiKeyPool.from_settings(settings, analyzer_factory=_fake_factory)
+
+    assert len(pool.slots) == 2
+    assert pool.slots[0].analyzer.key == 'key-a'
+    assert pool.slots[1].analyzer.key == 'key-b'
 
 
 def test_rpm_limit_is_enforced_per_slot() -> None:

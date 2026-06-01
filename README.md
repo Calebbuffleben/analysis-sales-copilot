@@ -129,12 +129,28 @@ LOG_LEVEL=INFO  # Use DEBUG for troubleshooting
 
 ### Gemini multi-key pool
 
-For production traffic with many simultaneous tenants, configure
-`GEMINI_API_KEYS` as a comma-separated list. The Python service hashes
-`tenant_id` to a stable key slot, so one tenant consistently uses the same
-Gemini key while each key keeps its own RPM window and 429 backoff. If
-`GEMINI_API_KEYS` is not set, `GEMINI_API_KEY` keeps the legacy single-key
-behavior.
+Para tráfego de produção com vários tenants/reuniões simultâneas, use o pool de chaves Gemini. Guia completo: **[docs/gemini-multi-key-pool.md](../docs/gemini-multi-key-pool.md)**.
+
+**Motivação:** a API Gemini impõe RPM por key. Com uma única key, todos os tenants disputavam o mesmo teto (~12 RPM global antes do pool), gerando filas, defer e fallback rule-based. Com N keys, a capacidade nominal sobe para **N × `GEMINI_RPM_LIMIT`** RPM.
+
+**Comportamento:**
+
+- `GEMINI_API_KEYS=key1,key2,key3` — um slot por key; `GEMINI_API_KEY` é ignorada quando a lista está definida.
+- Roteamento **sticky** por `tenant_id` (`sha256(tenant_id) % N`) — o mesmo tenant sempre usa a mesma key.
+- Cada slot tem `GeminiAnalyzer` próprio (`google-genai`), janela RPM independente e backoff 429 isolado.
+- Se só `GEMINI_API_KEY` estiver definida, o modo single-key continua válido (retrocompat).
+
+**Configuração recomendada:**
+
+```bash
+GEMINI_API_KEYS=key1,key2,key3   # CSV, sem espaços
+GEMINI_RPM_LIMIT=12                   # ~80% do tier Google (free ≈ 15 RPM)
+GEMINI_KEY_ROUTING=tenant
+```
+
+**Não** coloque várias keys em `GEMINI_API_KEY` separadas por vírgula — use `GEMINI_API_KEYS`. O serviço tenta split automático com warning, mas a forma correta é a variável dedicada.
+
+**Implicações:** keys de projetos Google diferentes somam quota separada; keys do mesmo projeto compartilham limites diários. Monitore `gemini_pool_slots`, `gemini_key_calls_total{slot}` e `gemini_key_rpm_limited_total{slot}` em `:9100/metrics`.
 
 ### Multi-tenant ingress contract
 
@@ -415,6 +431,7 @@ After deployment:
 
 ## 📚 Additional Resources
 
+- [Gemini multi-key pool](../docs/gemini-multi-key-pool.md)
 - [Free LLM Setup Guide](free-llm-setup-ollama.md)
 - [Migration Guide](migration-gemini-to-ollama.md)
 - [LLM Improvements Summary](../docs/llm-improvements-summary.md)

@@ -288,8 +288,23 @@ class Settings:
             return ()
         parts = [part.strip() for part in raw.split(',')]
         if any(not part for part in parts):
-            raise ValueError('GEMINI_API_KEYS contains empty entries.')
+            raise ValueError('Gemini API key list contains empty entries.')
         return tuple(parts)
+
+    def effective_gemini_api_keys(self) -> tuple[str, ...]:
+        """Return all configured Gemini API keys for the key pool.
+
+        ``GEMINI_API_KEYS`` takes precedence. If only ``GEMINI_API_KEY`` is set and it
+        contains commas, split it the same way (common misconfiguration).
+        """
+        if self.gemini_api_keys:
+            return self.gemini_api_keys
+        single = (self.gemini_api_key or '').strip()
+        if not single:
+            return ()
+        if ',' in single:
+            return self._parse_csv(single)
+        return (single,)
 
     def grpc_feedback_wants_auto_jwt(self) -> bool:
         """True when env requests automatic SERVICE JWT mint/refresh via HTTP bootstrap.
@@ -455,7 +470,8 @@ class Settings:
         if self.metrics_port < 1 or self.metrics_port > 65535:
             raise ValueError(f'Invalid METRICS_PORT: {self.metrics_port}')
         if self.llm_provider == 'gemini':
-            if not self.gemini_api_keys and not (self.gemini_api_key or '').strip():
+            keys = self.effective_gemini_api_keys()
+            if not keys:
                 raise ValueError(
                     'LLM_PROVIDER=gemini requires GEMINI_API_KEYS or GEMINI_API_KEY.',
                 )
