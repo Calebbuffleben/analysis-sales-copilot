@@ -24,32 +24,36 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dotenv import load_dotenv
 load_dotenv()
 
+
+def _gemini_keys() -> list[str]:
+    raw_multi = os.getenv('GEMINI_API_KEYS') or ''
+    keys = [part.strip() for part in raw_multi.split(',') if part.strip()]
+    single = (os.getenv('GEMINI_API_KEY') or '').strip()
+    if not keys and single:
+        keys = [single]
+    return keys
+
 def test_api_key():
     """Test 1: Verify API key is configured."""
-    api_key = os.getenv('GEMINI_API_KEY')
-    if not api_key or api_key == 'your_api_key_here':
-        print("❌ FAIL: GEMINI_API_KEY not set in .env")
-        print("   Fix: Add your API key from https://aistudio.google.com/app/apikey")
+    keys = _gemini_keys()
+    if not keys or keys[0] == 'your_api_key_here':
+        print("❌ FAIL: GEMINI_API_KEYS or GEMINI_API_KEY not set in .env")
+        print("   Fix: Add your API key(s) from https://aistudio.google.com/app/apikey")
         return False
-    masked = api_key[:4] + '...' + api_key[-4:]
-    print(f"✅ PASS: API key configured ({masked})")
+    masked = keys[0][:4] + '...' + keys[0][-4:]
+    print(f"✅ PASS: API key configured ({masked}, slots={len(keys)})")
     return True
 
 def test_connection():
     """Test 2: Verify Gemini connection."""
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
-
-        # List available models
-        models = list(genai.list_models())
-        flash_models = [m.name for m in models if 'flash' in m.name.lower() and 'generateContent' in m.supported_generation_methods]
-
-        if not flash_models:
-            print(f"⚠️  WARN: No Flash models found. Available: {[m.name for m in models[:5]]}")
-        else:
-            print(f"✅ PASS: Gemini connected. Flash models: {', '.join(flash_models)}")
-
+        from google import genai
+        client = genai.Client(api_key=_gemini_keys()[0])
+        client.models.generate_content(
+            model=os.getenv('GEMINI_MODEL', 'gemini-2.5-flash'),
+            contents='ping',
+        )
+        print("✅ PASS: Gemini connected")
         return True
     except Exception as e:
         print(f"❌ FAIL: Gemini connection error: {e}")
@@ -60,12 +64,12 @@ def test_analysis():
     try:
         from src.modules.text_analysis.gemini_analyzer import GeminiAnalyzer
 
-        api_key = os.getenv('GEMINI_API_KEY')
-        if not api_key:
+        keys = _gemini_keys()
+        if not keys:
             print("❌ FAIL: No API key for analyzer test")
             return False
 
-        analyzer = GeminiAnalyzer(api_key=api_key)
+        analyzer = GeminiAnalyzer(api_key=keys[0])
 
         test_text = "Achei o preço um pouco alto comparado ao concorrente X"
         test_state = {
@@ -106,15 +110,19 @@ def test_analysis():
 def test_rate_limiter_config():
     """Test 4: Verify rate limiter configuration."""
     try:
-        from src.modules.text_analysis.text_analysis_service import TextAnalysisService
+        from src.config.settings import get_settings
+        settings = get_settings()
 
-        # Check RPM limit is set correctly
-        if TextAnalysisService.RPM_LIMIT == 12:
-            print(f"✅ PASS: Rate limiter configured (limit={TextAnalysisService.RPM_LIMIT} RPM, window={TextAnalysisService.RPM_WINDOW_SEC}s)")
+        if settings.gemini_rpm_limit >= 1:
+            print(
+                "✅ PASS: Rate limiter configured "
+                f"(limit={settings.gemini_rpm_limit} RPM/key, "
+                f"window={settings.gemini_rpm_window_sec}s)"
+            )
             return True
         else:
-            print(f"⚠️  WARN: Rate limiter limit is {TextAnalysisService.RPM_LIMIT} (expected 12)")
-            return True
+            print(f"❌ FAIL: Invalid GEMINI_RPM_LIMIT={settings.gemini_rpm_limit}")
+            return False
 
     except Exception as e:
         print(f"❌ FAIL: Rate limiter config error: {e}")
@@ -125,12 +133,12 @@ def test_spin_skip_step_risk():
     try:
         from src.modules.text_analysis.gemini_analyzer import GeminiAnalyzer
 
-        api_key = os.getenv('GEMINI_API_KEY')
-        if not api_key:
+        keys = _gemini_keys()
+        if not keys:
             print("❌ FAIL: No API key for SPIN scenario")
             return False
 
-        analyzer = GeminiAnalyzer(api_key=api_key)
+        analyzer = GeminiAnalyzer(api_key=keys[0])
         test_state = {
             'interesse': 'medio',
             'resistencia': 'baixa',

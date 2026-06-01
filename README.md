@@ -97,6 +97,17 @@ docker-compose logs -f audio-pipeline-service
 # LLM Model Selection
 OLLAMA_MODEL=qwen2.5:7b  # Best for Portuguese
 
+# Gemini cloud mode (recommended for production)
+LLM_PROVIDER=gemini
+GEMINI_MODEL=gemini-2.5-flash
+# Single-key mode:
+GEMINI_API_KEY=your_api_key_here
+# Multi-key pool (sticky by tenant_id; capacity ~= keys * GEMINI_RPM_LIMIT):
+# GEMINI_API_KEYS=key1,key2,key3
+GEMINI_RPM_LIMIT=12
+GEMINI_RPM_WINDOW_SEC=60
+GEMINI_KEY_ROUTING=tenant
+
 # Backend Connection
 GRPC_FEEDBACK_URL=localhost:50052  # Your backend server (host:port for gRPC)
 
@@ -115,6 +126,15 @@ GRPC_FEEDBACK_URL=localhost:50052  # Your backend server (host:port for gRPC)
 # Logging
 LOG_LEVEL=INFO  # Use DEBUG for troubleshooting
 ```
+
+### Gemini multi-key pool
+
+For production traffic with many simultaneous tenants, configure
+`GEMINI_API_KEYS` as a comma-separated list. The Python service hashes
+`tenant_id` to a stable key slot, so one tenant consistently uses the same
+Gemini key while each key keeps its own RPM window and 429 backoff. If
+`GEMINI_API_KEYS` is not set, `GEMINI_API_KEY` keeps the legacy single-key
+behavior.
 
 ### Multi-tenant ingress contract
 
