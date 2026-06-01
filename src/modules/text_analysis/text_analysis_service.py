@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
 
 from .gemini_analyzer import GeminiAnalyzer, QuotaExhaustedError
+from .gemini_key_pool import GeminiKeyPool, GeminiKeySlot
 from .ollama_analyzer import OllamaAnalyzer
 from .llm_state_validator import ConversationState, validate_conversation_state, build_playbook_hint_json
 from .llm_cache import SimpleTextCache
@@ -81,8 +82,8 @@ class TextAnalysisService:
     # Max states to keep in memory (prevents unbounded growth)
     MAX_STATES = 1000
 
-    # RPM rate limiter: Google Gemini free tier = 15 RPM.
-    # Use 12 as safety margin (80 % of limit).
+    # Defaults used when settings are not injected. Runtime Gemini limits are
+    # enforced per key slot by GeminiKeyPool.
     RPM_LIMIT = 12
     RPM_WINDOW_SEC = 60.0
 
@@ -103,22 +104,26 @@ class TextAnalysisService:
                 model=settings.ollama_model,
                 timeout=settings.ollama_timeout,
             )
+            self._gemini_pool: Optional[GeminiKeyPool] = None
             logger.info("Using Ollama LLM provider (model: %s)", settings.ollama_model)
             self._rate_limiter_enabled = False
         else:  # gemini
-            self.active_analyzer = gemini_analyzer or GeminiAnalyzer(
-                api_key=settings.gemini_api_key or "",
-                model_name=settings.gemini_model,
+            self._gemini_pool = (
+                GeminiKeyPool.from_analyzer(
+                    gemini_analyzer,
+                    rpm_limit=settings.gemini_rpm_limit,
+                    rpm_window_sec=settings.gemini_rpm_window_sec,
+                )
+                if gemini_analyzer is not None
+                else GeminiKeyPool.from_settings(settings)
             )
+            self.active_analyzer = self._gemini_pool.slots[0].analyzer
             logger.info("Using Gemini LLM provider (model: %s)", settings.gemini_model)
             self._rate_limiter_enabled = True
 
         # --- RPM rate limiter (Gemini only) ---
-        # Sliding window of actual Gemini call timestamps.
-        self._call_timestamps: deque = deque()
         # Queue of deferred analyses waiting for an RPM slot.
         self._rate_queue: deque = deque()
-        self._rate_limiter_lock = threading.Lock()
         self._rate_queue_lock = threading.Lock()
         self._dispatcher_thread: Optional[threading.Thread] = None
         self._dispatcher_stop = threading.Event()
@@ -155,52 +160,67 @@ class TextAnalysisService:
             daemon=True,
         )
         self._dispatcher_thread.start()
-        logger.info("LLM rate-limit dispatcher started (Gemini mode, limit=%d RPM)", self.RPM_LIMIT)
+        slots = len(self._gemini_pool.slots) if self._gemini_pool else 0
+        logger.info(
+            "LLM rate-limit dispatcher started (Gemini mode, slots=%d)",
+            slots,
+        )
 
     def _dispatcher_loop(self) -> None:
         """Background loop: wait for RPM slot, then dispatch queued analyses."""
         logger.info("LLM rate-limit dispatcher loop running")
         while not self._dispatcher_stop.is_set():
-            # Clean old timestamps outside the RPM window
-            now = time.time()
-            with self._rate_limiter_lock:
-                while self._call_timestamps and (now - self._call_timestamps[0]) > self.RPM_WINDOW_SEC:
-                    self._call_timestamps.popleft()
-                can_call = len(self._call_timestamps) < self.RPM_LIMIT
-
-            if can_call:
-                # Try to pop a deferred analysis
-                deferred = None
-                with self._rate_queue_lock:
-                    if self._rate_queue:
-                        deferred = self._rate_queue.popleft()
-                        LLM_RATE_QUEUE_SIZE.set(len(self._rate_queue))
-
-                if deferred:
-                    self._dispatch_deferred(deferred)
-                    # Record the timestamp so subsequent iterations respect the limit
-                    with self._rate_limiter_lock:
-                        self._call_timestamps.append(time.time())
-                    # Small pause to avoid burst
-                    time.sleep(0.2)
-                    continue
+            ready = self._pop_deferred_for_available_slot()
+            if ready:
+                deferred, slot = ready
+                self._dispatch_deferred(deferred, slot)
+                # Small pause to avoid burst
+                time.sleep(0.2)
+                continue
 
             # No slot or no work — sleep briefly
             self._dispatcher_stop.wait(0.5)
 
-    def _dispatch_deferred(self, deferred: _DeferredAnalysis) -> None:
+    def _pop_deferred_for_available_slot(
+        self,
+    ) -> Optional[tuple[_DeferredAnalysis, GeminiKeySlot]]:
+        if self._gemini_pool is None:
+            return None
+
+        with self._rate_queue_lock:
+            queue_len = len(self._rate_queue)
+            for _ in range(queue_len):
+                deferred = self._rate_queue.popleft()
+                slot = self._gemini_pool.resolve_slot(deferred.chunk.tenant_id)
+                if slot.try_acquire():
+                    LLM_RATE_QUEUE_SIZE.set(len(self._rate_queue))
+                    return deferred, slot
+                self._rate_queue.append(deferred)
+            LLM_RATE_QUEUE_SIZE.set(len(self._rate_queue))
+        return None
+
+    def _dispatch_deferred(
+        self,
+        deferred: _DeferredAnalysis,
+        slot: GeminiKeySlot,
+    ) -> None:
         """Run the LLM analysis for a deferred chunk and publish if it has feedback."""
         waited_ms = int(time.time() * 1000) - deferred.enqueued_at_ms
         logger.info(
             "Dispatching deferred analysis | meeting=%s | participant=%s | "
-            "text_len=%d | waited_ms=%d",
+            "text_len=%d | waited_ms=%d | slot=%s",
             deferred.chunk.meeting_id,
             deferred.chunk.participant_id,
             len(deferred.chunk.text or ''),
             waited_ms,
+            slot.index,
         )
         try:
-            result = self._run_llm_analysis(deferred.chunk.text, deferred.current_state)
+            result = self._run_llm_analysis(
+                deferred.chunk,
+                deferred.current_state,
+                slot.analyzer,
+            )
             if result and result.get('direct_feedback'):
                 self._publish_deferred_result(result, deferred.chunk)
         except Exception as e:
@@ -245,6 +265,7 @@ class TextAnalysisService:
                 transcript_text=chunk.text,
                 transcript_confidence=chunk.confidence,
                 analysis=analysis_obj,
+                tenant_id=chunk.tenant_id,
             )
             enqueued = self._publish_dispatcher.enqueue(event)
             if enqueued:
@@ -261,14 +282,11 @@ class TextAnalysisService:
         except Exception as pub_err:
             logger.warning("Deferred analysis publish failed (best effort): %s", pub_err)
 
-    def _next_rpm_slot_ms(self) -> int:
+    def _next_rpm_slot_ms(self, chunk: TranscriptionChunk) -> int:
         """Return the timestamp (ms) when the next RPM slot opens."""
-        now = time.time()
-        with self._rate_limiter_lock:
-            if len(self._call_timestamps) < self.RPM_LIMIT:
-                return int(now * 1000)
-            oldest = self._call_timestamps[0]
-            return int((oldest + self.RPM_WINDOW_SEC) * 1000)
+        if self._gemini_pool is None:
+            return int(time.time() * 1000)
+        return self._gemini_pool.resolve_slot(chunk.tenant_id).next_available_ms()
 
     # ------------------------------------------------------------------
     # Public API
@@ -371,28 +389,23 @@ class TextAnalysisService:
         else:
             LLM_CACHE_MISSES_TOTAL.inc()
 
-            if self._rate_limiter_enabled:
+            if self._rate_limiter_enabled and self._gemini_pool is not None:
                 # Check RPM — if over limit, enqueue for deferred dispatch
-                now = time.time()
-                with self._rate_limiter_lock:
-                    while self._call_timestamps and (now - self._call_timestamps[0]) > self.RPM_WINDOW_SEC:
-                        self._call_timestamps.popleft()
-                    can_call = len(self._call_timestamps) < self.RPM_LIMIT
-
-                if not can_call:
+                slot = self._gemini_pool.resolve_slot(chunk.tenant_id)
+                if not slot.try_acquire():
                     # Rate limit hit — enqueue, return fallback immediately
                     with self._rate_queue_lock:
                         self._rate_queue.append(_DeferredAnalysis(chunk, current_state))
                         LLM_RATE_LIMITED_TOTAL.inc()
                         LLM_RATE_QUEUE_SIZE.set(len(self._rate_queue))
 
-                    next_slot_ms = self._next_rpm_slot_ms()
-                    wait_ms = max(0, next_slot_ms - int(now * 1000))
+                    next_slot_ms = self._next_rpm_slot_ms(chunk)
+                    wait_ms = max(0, next_slot_ms - int(time.time() * 1000))
                     logger.warning(
-                        "RPM limit reached (%d/%ds) — analysis deferred. "
-                        "Next slot in ~%dms | queue_size=%d | meeting=%s",
-                        self.RPM_LIMIT, self.RPM_WINDOW_SEC,
-                        wait_ms, len(self._rate_queue), chunk.meeting_id,
+                        "RPM limit reached for Gemini key slot %s — analysis deferred. "
+                        "Next slot in ~%dms | queue_size=%d | meeting=%s | tenant=%s",
+                        slot.index, wait_ms, len(self._rate_queue),
+                        chunk.meeting_id, chunk.tenant_id or 'default',
                     )
 
                     # Return fallback immediately so the pipeline doesn't block
@@ -407,9 +420,11 @@ class TextAnalysisService:
                     # background thread and published separately.
                 else:
                     # Within RPM limit — call Gemini now, record timestamp
-                    analysis_result = self._call_llm_with_fallback(chunk, current_state)
-                    with self._rate_limiter_lock:
-                        self._call_timestamps.append(time.time())
+                    analysis_result = self._call_llm_with_fallback(
+                        chunk,
+                        current_state,
+                        slot.analyzer,
+                    )
             else:
                 # Ollama mode — no rate limiting
                 analysis_result = self._call_llm_with_fallback(chunk, current_state)
@@ -503,14 +518,18 @@ class TextAnalysisService:
     # ------------------------------------------------------------------
 
     def _call_llm_with_fallback(
-        self, chunk: TranscriptionChunk, current_state: Dict[str, Any],
+        self,
+        chunk: TranscriptionChunk,
+        current_state: Dict[str, Any],
+        analyzer: Optional[object] = None,
     ) -> Dict[str, Any]:
         """Call the LLM with full fallback chain. Returns analysis dict."""
         llm_start_ms = time.time() * 1000
         LLM_CALLS_TOTAL.inc()
+        active_analyzer = analyzer or self.active_analyzer
 
         try:
-            analysis_result = self.active_analyzer.analyze(chunk.text, current_state)
+            analysis_result = active_analyzer.analyze(chunk.text, current_state)
             llm_duration_ms = time.time() * 1000 - llm_start_ms
             LLM_CALL_DURATION_MS.observe(llm_duration_ms)
 
@@ -552,7 +571,7 @@ class TextAnalysisService:
                 return analyze_text_fallback(chunk.text, current_state).to_dict()
             except Exception as fb_err:
                 logger.error("Rule-based fallback also failed: %s", fb_err)
-                return self.active_analyzer._default_response(current_state)
+                return active_analyzer._default_response(current_state)
 
         except Exception as e:
             llm_duration_ms = time.time() * 1000 - llm_start_ms
@@ -578,12 +597,16 @@ class TextAnalysisService:
                 return analyze_text_fallback(chunk.text, current_state).to_dict()
             except Exception as fb_err:
                 logger.error("Both LLM and fallback failed: %s", fb_err)
-                return self.active_analyzer._default_response(current_state)
+                return active_analyzer._default_response(current_state)
 
     def _run_llm_analysis(
-        self, text: str, current_state: Dict[str, Any],
+        self,
+        chunk: TranscriptionChunk,
+        current_state: Dict[str, Any],
+        analyzer: object,
     ) -> Optional[Dict[str, Any]]:
         """Run LLM analysis for a deferred chunk (called from dispatcher thread)."""
+        text = chunk.text
         cached = self._llm_cache.get(text)
         if cached is not None:
             LLM_CACHE_HITS_TOTAL.inc()
@@ -594,7 +617,7 @@ class TextAnalysisService:
         llm_start_ms = time.time() * 1000
 
         try:
-            result = self.active_analyzer.analyze(text, current_state)
+            result = analyzer.analyze(text, current_state)
             LLM_CALL_DURATION_MS.observe(time.time() * 1000 - llm_start_ms)
             if result.get('direct_feedback'):
                 self._llm_cache.put(text, result)

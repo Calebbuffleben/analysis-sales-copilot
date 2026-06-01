@@ -48,3 +48,45 @@ def test_assemblyai_provider_validates_with_api_key() -> None:
     )
 
     settings.validate()
+
+
+def test_gemini_provider_requires_at_least_one_api_key() -> None:
+    settings = Settings(
+        grpc_feedback_enabled=False,
+        stt_provider='local',
+        llm_provider='gemini',
+        gemini_api_key=None,
+        gemini_api_keys=(),
+    )
+
+    try:
+        settings.validate()
+    except ValueError as exc:
+        assert 'GEMINI_API_KEYS or GEMINI_API_KEY' in str(exc)
+    else:
+        raise AssertionError('Expected missing Gemini API keys to fail validation')
+
+
+def test_gemini_provider_accepts_multi_key_pool() -> None:
+    settings = Settings(
+        grpc_feedback_enabled=False,
+        stt_provider='local',
+        llm_provider='gemini',
+        gemini_api_keys=('key-a', 'key-b'),
+        gemini_rpm_limit=12,
+        gemini_rpm_window_sec=60.0,
+        gemini_key_routing='tenant',
+    )
+
+    settings.validate()
+
+
+def test_gemini_api_keys_rejects_empty_entries(monkeypatch) -> None:
+    monkeypatch.setenv('GEMINI_API_KEYS', 'key-a,,key-b')
+
+    try:
+        Settings.from_env()
+    except ValueError as exc:
+        assert 'GEMINI_API_KEYS contains empty entries' in str(exc)
+    else:
+        raise AssertionError('Expected malformed GEMINI_API_KEYS to fail parsing')

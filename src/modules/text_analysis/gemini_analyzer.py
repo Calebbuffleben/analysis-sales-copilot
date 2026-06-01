@@ -2,16 +2,12 @@
 
 import json
 import logging
+import re
 import time
-from typing import Any, Dict
-
-import google.generativeai as genai
-from google.generativeai.types import GenerationConfig
+from typing import Any, Dict, Optional
 
 from .llm_state_validator import (
     validate_llm_response,
-    LLMAnalysisResult,
-    ConversationState,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,13 +32,31 @@ class GeminiAnalyzer:
     - Response validation: ensures LLM output matches expected schema
     """
 
-    def __init__(self, api_key: str, model_name: str = 'gemini-2.5-flash'):
-        if api_key:
-            genai.configure(api_key=api_key)
-        else:
-            logger.warning("No Gemini API key provided. Analysis might fail if not injected properly.")
+    def __init__(
+        self,
+        api_key: str,
+        model_name: str = 'gemini-2.5-flash',
+        client: Optional[Any] = None,
+    ):
+        if client is None:
+            if not api_key:
+                logger.warning("No Gemini API key provided. Analysis might fail if not injected properly.")
+            try:
+                from google import genai
+                from google.genai import types
+            except Exception as exc:
+                raise RuntimeError(
+                    'google-genai is required for Gemini analysis. '
+                    'Install python-service requirements before starting.',
+                ) from exc
 
-        self.model = genai.GenerativeModel(model_name)
+            client = genai.Client(api_key=api_key)
+            self._generation_config_factory = types.GenerateContentConfig
+        else:
+            self._generation_config_factory = None
+
+        self.client = client
+        self.model_name = model_name
         
         # Quota protection: track consecutive 429 errors
         self._consecutive_429_errors = 0
@@ -74,9 +88,10 @@ class GeminiAnalyzer:
         prompt = self._build_prompt(text, conversation_state)
 
         try:
-            response = self.model.generate_content(
-                prompt,
-                generation_config=GenerationConfig(
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=self._generation_config(
                     response_mime_type="application/json",
                     temperature=0.2,
                 )
@@ -124,11 +139,10 @@ class GeminiAnalyzer:
                 if 'retry in' in error_message.lower():
                     try:
                         # Parse "retry in 14.87268893s"
-                        import re
                         match = re.search(r'retry in ([\d.]+)s', error_message.lower())
                         if match:
                             retry_delay_sec = float(match.group(1))
-                    except:
+                    except Exception:
                         pass
                 
                 # Exponential backoff: base_delay * 2^(consecutive_errors - 1), max 5 minutes
@@ -153,6 +167,11 @@ class GeminiAnalyzer:
             # Non-429 error: log and return default
             logger.exception(f"Error during Gemini analysis (non-quota): {e}")
             return self._default_response(conversation_state)
+
+    def _generation_config(self, **kwargs: Any) -> Any:
+        if self._generation_config_factory is None:
+            return kwargs
+        return self._generation_config_factory(**kwargs)
             
     def _default_response(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """Return a safe fallback if Gemini fails."""

@@ -34,6 +34,9 @@ class _NoopMetric:
     def observe(self, value: float) -> None:  # noqa: ARG002
         return
 
+    def labels(self, *args: object, **kwargs: object) -> '_NoopMetric':  # noqa: ARG002
+        return self
+
 
 def _metric_or_noop(metric_ctor: Optional[object], *args: object, **kwargs: object) -> object:
     if metric_ctor is None:
@@ -322,5 +325,25 @@ LLM_RATE_QUEUE_SIZE = _metric_or_noop(
     Gauge,
     'llm_rate_queue_size',
     'Current number of LLM analyses waiting in the RPM rate-limit queue.',
+)
+
+GEMINI_POOL_SLOTS = _metric_or_noop(
+    Gauge,
+    'gemini_pool_slots',
+    'Number of configured Gemini API key slots.',
+)
+
+GEMINI_KEY_CALLS_TOTAL = _metric_or_noop(
+    Counter,
+    'gemini_key_calls_total',
+    'Total Gemini API calls reserved per key slot.',
+    ['slot'],
+)
+
+GEMINI_KEY_RPM_LIMITED_TOTAL = _metric_or_noop(
+    Counter,
+    'gemini_key_rpm_limited_total',
+    'Total Gemini calls deferred because the selected key slot hit RPM.',
+    ['slot'],
 )
 

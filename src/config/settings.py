@@ -89,7 +89,11 @@ class Settings:
     
     # Gemini settings (if using Google API)
     gemini_api_key: Optional[str] = None
+    gemini_api_keys: tuple[str, ...] = ()
     gemini_model: str = 'gemini-2.5-flash'
+    gemini_rpm_limit: int = 12
+    gemini_rpm_window_sec: float = 60.0
+    gemini_key_routing: str = 'tenant'
 
     @classmethod
     def from_env(cls) -> 'Settings':
@@ -239,8 +243,12 @@ class Settings:
             ollama_base_url=os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434'),
             ollama_model=os.getenv('OLLAMA_MODEL', 'llama3.1:8b'),
             ollama_timeout=int(os.getenv('OLLAMA_TIMEOUT', '30')),
-            gemini_api_key=os.getenv('GEMINI_API_KEY'),
+            gemini_api_key=(os.getenv('GEMINI_API_KEY') or '').strip() or None,
+            gemini_api_keys=cls._parse_csv(os.getenv('GEMINI_API_KEYS')),
             gemini_model=os.getenv('GEMINI_MODEL', 'gemini-2.5-flash'),
+            gemini_rpm_limit=int(os.getenv('GEMINI_RPM_LIMIT', '12')),
+            gemini_rpm_window_sec=float(os.getenv('GEMINI_RPM_WINDOW_SEC', '60.0')),
+            gemini_key_routing=os.getenv('GEMINI_KEY_ROUTING', 'tenant').strip().lower(),
         )
 
     @staticmethod
@@ -273,6 +281,15 @@ class Settings:
         if raw is None or not raw.strip():
             return None
         return float(raw)
+
+    @staticmethod
+    def _parse_csv(raw: Optional[str]) -> tuple[str, ...]:
+        if raw is None or not raw.strip():
+            return ()
+        parts = [part.strip() for part in raw.split(',')]
+        if any(not part for part in parts):
+            raise ValueError('GEMINI_API_KEYS contains empty entries.')
+        return tuple(parts)
 
     def grpc_feedback_wants_auto_jwt(self) -> bool:
         """True when env requests automatic SERVICE JWT mint/refresh via HTTP bootstrap.
@@ -437,6 +454,22 @@ class Settings:
             )
         if self.metrics_port < 1 or self.metrics_port > 65535:
             raise ValueError(f'Invalid METRICS_PORT: {self.metrics_port}')
+        if self.llm_provider == 'gemini':
+            if not self.gemini_api_keys and not (self.gemini_api_key or '').strip():
+                raise ValueError(
+                    'LLM_PROVIDER=gemini requires GEMINI_API_KEYS or GEMINI_API_KEY.',
+                )
+            if self.gemini_rpm_limit < 1:
+                raise ValueError(f'Invalid GEMINI_RPM_LIMIT: {self.gemini_rpm_limit}')
+            if self.gemini_rpm_window_sec <= 0:
+                raise ValueError(
+                    f'Invalid GEMINI_RPM_WINDOW_SEC: {self.gemini_rpm_window_sec}',
+                )
+            if self.gemini_key_routing not in {'tenant'}:
+                raise ValueError(
+                    f'Invalid GEMINI_KEY_ROUTING: {self.gemini_key_routing}. '
+                    'Expected "tenant".',
+                )
 
 
 # Global settings instance
