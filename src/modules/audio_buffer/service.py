@@ -51,6 +51,7 @@ class AudioBufferState:
     last_timestamp_ms: int
     last_sequence: int
     tenant_id: str = ''
+    participant_role: str = ''
 
 
 class AudioBufferService:
@@ -79,6 +80,7 @@ class AudioBufferService:
         timestamp_ms: int,
         sequence: int,
         tenant_id: str = '',
+        participant_role: str = '',
     ) -> None:
         """Append audio to the stream buffer and notify the worker."""
         pcm_data = self._extract_pcm(wav_data)
@@ -92,12 +94,15 @@ class AudioBufferService:
             timestamp_ms=timestamp_ms,
             sequence=sequence,
             tenant_id=tenant_id,
+            participant_role=participant_role,
         )
         state.buffer.append(pcm_data)
         state.last_timestamp_ms = timestamp_ms
         state.last_sequence = sequence
         if tenant_id and not state.tenant_id:
             state.tenant_id = tenant_id
+        if participant_role and not state.participant_role:
+            state.participant_role = participant_role
         self._worker.on_chunk_appended(stream_key, timestamp_ms)
 
     def get_window(self, stream_key: str) -> Optional[bytes]:
@@ -136,6 +141,7 @@ class AudioBufferService:
             'window_start_ms': window_start_ms,
             'window_end_ms': window_end_ms,
             'tenant_id': state.tenant_id,
+            'participant_role': state.participant_role,
         }
 
     def end_stream(self, stream_key: str) -> None:
@@ -153,6 +159,7 @@ class AudioBufferService:
         timestamp_ms: int,
         sequence: int,
         tenant_id: str = '',
+        participant_role: str = '',
     ) -> AudioBufferState:
         state = self._states.get(stream_key)
         if state:
@@ -170,6 +177,7 @@ class AudioBufferService:
             last_timestamp_ms=timestamp_ms,
             last_sequence=sequence,
             tenant_id=tenant_id,
+            participant_role=participant_role,
         )
         self._states[stream_key] = state
         return state

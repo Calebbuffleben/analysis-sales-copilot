@@ -375,6 +375,7 @@ class AssemblyAiStreamingProvider:
             window_start_ms=window_start_ms,
             window_end_ms=window_end_ms,
             tenant_id=str(session.meta.get('tenant_id') or ''),
+            participant_role=str(session.meta.get('participant_role') or ''),
         )
         extra_stats: dict[str, object] = {
             'samples_count': int(stats.get('samples_count') or 0),

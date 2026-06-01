@@ -18,6 +18,7 @@ message AudioChunk {
   int32 sequence = 8;
   string tenant_id = 9;
   string user_id = 10;
+  string participant_role = 11;  // host | participant | unknown
 }
 
 message StreamAudioResponse {

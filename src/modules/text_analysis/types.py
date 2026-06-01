@@ -17,6 +17,7 @@ class TranscriptionChunk:
     window_start_ms: int
     window_end_ms: int
     tenant_id: str = ''
+    participant_role: str = ''
 
 
 @dataclass

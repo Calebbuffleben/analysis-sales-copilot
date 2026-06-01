@@ -150,6 +150,7 @@ class TranscriptionPipelineService:
             window_start_ms=int(enriched_meta['window_start_ms']),
             window_end_ms=int(enriched_meta['window_end_ms']),
             tenant_id=str(enriched_meta.get('tenant_id') or ''),
+            participant_role=str(enriched_meta.get('participant_role') or ''),
         )
         logger.info(f"[Step 3] Enviando transcrição para análise do Gemini")
         t_ana_start = time.perf_counter()
@@ -298,7 +299,7 @@ class TranscriptionPipelineService:
             meeting_id=transcript.meeting_id,
             participant_id=transcript.participant_id,
             participant_name=None,
-            participant_role=None,
+            participant_role=transcript.participant_role or None,
             feedback_type='text_analysis_ingress',
             severity='info',
             ts_ms=transcript.timestamp_ms,

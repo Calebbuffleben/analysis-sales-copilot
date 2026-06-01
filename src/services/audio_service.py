@@ -73,6 +73,7 @@ class AudioService:
         sequence: int,
         timestamp_ms: int,
         tenant_id: str = '',
+        participant_role: str = '',
     ) -> None:
         """
         Process a single audio chunk.
@@ -122,6 +123,7 @@ class AudioService:
                 timestamp_ms=timestamp_ms,
                 sequence=sequence,
                 tenant_id=tenant_id,
+                participant_role=participant_role,
             )
         if self.streaming_stt_provider and stats:
             try:
@@ -138,6 +140,7 @@ class AudioService:
                         'timestamp_ms': timestamp_ms,
                         'sequence': sequence,
                         'tenant_id': tenant_id,
+                        'participant_role': participant_role,
                     },
                 )
             except Exception as exc:

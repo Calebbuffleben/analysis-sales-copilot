@@ -259,7 +259,7 @@ class TextAnalysisService:
                 meeting_id=chunk.meeting_id,
                 participant_id=chunk.participant_id,
                 participant_name=None,
-                participant_role=None,
+                participant_role=chunk.participant_role or None,
                 feedback_type='text_analysis_ingress',
                 severity='info',
                 ts_ms=chunk.timestamp_ms,
