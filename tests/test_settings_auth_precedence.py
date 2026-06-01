@@ -72,7 +72,10 @@ def test_gemini_provider_accepts_multi_key_pool() -> None:
         grpc_feedback_enabled=False,
         stt_provider='local',
         llm_provider='gemini',
-        gemini_api_keys=('key-a', 'key-b'),
+        gemini_api_keys=(
+            'AIzaSyTestKey00000000000000000001',
+            'AIzaSyTestKey00000000000000000002',
+        ),
         gemini_rpm_limit=12,
         gemini_rpm_window_sec=60.0,
         gemini_key_routing='tenant',
@@ -81,12 +84,39 @@ def test_gemini_provider_accepts_multi_key_pool() -> None:
     settings.validate()
 
 
+def test_effective_gemini_api_keys_splits_comma_in_single_env_var() -> None:
+    settings = Settings(
+        gemini_api_key='AIzaSyOne,AIzaSyTwo',
+        gemini_api_keys=(),
+    )
+    assert settings.effective_gemini_api_keys() == ('AIzaSyOne', 'AIzaSyTwo')
+
+
+def test_gemini_validate_rejects_non_google_key_shape() -> None:
+    settings = Settings(
+        grpc_feedback_enabled=False,
+        stt_provider='local',
+        llm_provider='gemini',
+        gemini_api_keys=('not-a-google-key',),
+        gemini_rpm_limit=12,
+        gemini_rpm_window_sec=60.0,
+        gemini_key_routing='tenant',
+    )
+
+    try:
+        settings.validate()
+    except ValueError as exc:
+        assert 'does not look valid' in str(exc)
+    else:
+        raise AssertionError('Expected invalid Gemini key shape to fail validation')
+
+
 def test_gemini_api_keys_rejects_empty_entries(monkeypatch) -> None:
     monkeypatch.setenv('GEMINI_API_KEYS', 'key-a,,key-b')
 
     try:
         Settings.from_env()
     except ValueError as exc:
-        assert 'GEMINI_API_KEYS contains empty entries' in str(exc)
+        assert 'Gemini API key list contains empty entries' in str(exc)
     else:
         raise AssertionError('Expected malformed GEMINI_API_KEYS to fail parsing')

@@ -10,7 +10,11 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
 
-from .gemini_analyzer import GeminiAnalyzer, QuotaExhaustedError
+from .gemini_analyzer import (
+    GeminiAnalyzer,
+    InvalidGeminiApiKeyError,
+    QuotaExhaustedError,
+)
 from .gemini_key_pool import GeminiKeyPool, GeminiKeySlot
 from .ollama_analyzer import OllamaAnalyzer
 from .llm_state_validator import ConversationState, validate_conversation_state, build_playbook_hint_json
@@ -547,15 +551,20 @@ class TextAnalysisService:
 
             return analysis_result
 
-        except QuotaExhaustedError as e:
+        except (QuotaExhaustedError, InvalidGeminiApiKeyError) as e:
             llm_duration_ms = time.time() * 1000 - llm_start_ms
             LLM_CALL_DURATION_MS.observe(llm_duration_ms)
             LLM_CALL_ERRORS_TOTAL.inc()
             LLM_FALLBACK_ACTIVATED_TOTAL.inc()
+            trace_event = (
+                'python.llm_invalid_key_fallback'
+                if isinstance(e, InvalidGeminiApiKeyError)
+                else 'python.llm_quota_fallback'
+            )
             log_feedback_trace(
                 logger,
                 logging.WARNING,
-                'python.llm_quota_fallback',
+                trace_event,
                 trace_id=make_feedback_trace_id(
                     chunk.meeting_id,
                     chunk.participant_id,
@@ -566,7 +575,16 @@ class TextAnalysisService:
                 window_end_ms=chunk.window_end_ms,
                 extra={'reason': str(e)},
             )
-            logger.warning("Gemini API quota exhausted (%s), using rule-based fallback", e)
+            if isinstance(e, InvalidGeminiApiKeyError):
+                logger.warning(
+                    "Gemini API key invalid (%s), using rule-based fallback",
+                    e,
+                )
+            else:
+                logger.warning(
+                    "Gemini API quota exhausted (%s), using rule-based fallback",
+                    e,
+                )
             try:
                 return analyze_text_fallback(chunk.text, current_state).to_dict()
             except Exception as fb_err:

@@ -94,15 +94,28 @@ class GeminiKeyPool:
         analyzer_factory: AnalyzerFactory | None = None,
     ) -> 'GeminiKeyPool':
         factory = analyzer_factory or (
-            lambda key, model: GeminiAnalyzer(api_key=key, model_name=model)
+            lambda key, model, index: GeminiAnalyzer(
+                api_key=key,
+                model_name=model,
+                slot_index=index,
+            )
         )
-        keys = settings.gemini_api_keys or (
-            (settings.gemini_api_key,) if settings.gemini_api_key else ()
-        )
+        keys = settings.effective_gemini_api_keys()
+        if (
+            settings.gemini_api_key
+            and ',' in settings.gemini_api_key.strip()
+            and not settings.gemini_api_keys
+        ):
+            logger.warning(
+                'GEMINI_API_KEY contains commas but GEMINI_API_KEYS is unset; '
+                'splitting GEMINI_API_KEY into %s pool slot(s). '
+                'Prefer GEMINI_API_KEYS=key1,key2 for clarity.',
+                len(keys),
+            )
         slots = [
             GeminiKeySlot(
                 index=index,
-                analyzer=factory(key, settings.gemini_model),
+                analyzer=factory(key, settings.gemini_model, index),
                 rpm_limit=settings.gemini_rpm_limit,
                 rpm_window_sec=settings.gemini_rpm_window_sec,
             )
