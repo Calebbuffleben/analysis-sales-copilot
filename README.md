@@ -143,7 +143,7 @@ Para tráfego de produção com vários tenants/reuniões simultâneas, use o po
 **Configuração recomendada:**
 
 ```bash
-GEMINI_API_KEYS=AIzaSy...,AIzaSy...   # CSV, sem espaços; keys AI Studio (prefixo AIza)
+GEMINI_API_KEYS=key1,key2,key3   # CSV, sem espaços
 GEMINI_RPM_LIMIT=12                   # ~80% do tier Google (free ≈ 15 RPM)
 GEMINI_KEY_ROUTING=tenant
 ```

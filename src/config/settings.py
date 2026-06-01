@@ -475,13 +475,6 @@ class Settings:
                 raise ValueError(
                     'LLM_PROVIDER=gemini requires GEMINI_API_KEYS or GEMINI_API_KEY.',
                 )
-            for index, key in enumerate(keys):
-                if not key.startswith('AIza'):
-                    raise ValueError(
-                        f'Gemini API key at index {index} does not look valid '
-                        '(expected Google AI Studio key starting with "AIza"). '
-                        'Use GEMINI_API_KEYS=key1,key2 for multiple keys.',
-                    )
             if self.gemini_rpm_limit < 1:
                 raise ValueError(f'Invalid GEMINI_RPM_LIMIT: {self.gemini_rpm_limit}')
             if self.gemini_rpm_window_sec <= 0:

@@ -92,23 +92,19 @@ def test_effective_gemini_api_keys_splits_comma_in_single_env_var() -> None:
     assert settings.effective_gemini_api_keys() == ('AIzaSyOne', 'AIzaSyTwo')
 
 
-def test_gemini_validate_rejects_non_google_key_shape() -> None:
+def test_gemini_validate_accepts_keys_without_format_prefix_check() -> None:
+    """Startup does not guess Google key shape; invalid keys fail at API call time."""
     settings = Settings(
         grpc_feedback_enabled=False,
         stt_provider='local',
         llm_provider='gemini',
-        gemini_api_keys=('not-a-google-key',),
+        gemini_api_keys=('AQ.custom-format-key', 'AIzaSyAlsoValid'),
         gemini_rpm_limit=12,
         gemini_rpm_window_sec=60.0,
         gemini_key_routing='tenant',
     )
 
-    try:
-        settings.validate()
-    except ValueError as exc:
-        assert 'does not look valid' in str(exc)
-    else:
-        raise AssertionError('Expected invalid Gemini key shape to fail validation')
+    settings.validate()
 
 
 def test_gemini_api_keys_rejects_empty_entries(monkeypatch) -> None:
