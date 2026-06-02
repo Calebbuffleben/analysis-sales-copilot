@@ -24,6 +24,10 @@ class TestConversationState:
         assert state.fase_spin == "neutro"
         assert state.proxima_pergunta_spin == ""
         assert state.alerta_risco_spin is False
+        assert state.product == ""
+        assert state.pain_points == []
+        assert state.objections == []
+        assert state.claims == []
 
     def test_valid_objections_are_kept(self):
         """Test that valid objection categories are preserved."""
@@ -78,6 +82,24 @@ class TestConversationState:
         assert result["fase_spin"] == "neutro"
         assert result["proxima_pergunta_spin"] == ""
         assert result["alerta_risco_spin"] is False
+        assert result["product"] == ""
+        assert result["pain_points"] == []
+        assert result["objections"] == []
+        assert result["claims"] == []
+
+    def test_meeting_context_fields_are_normalized(self):
+        """Meeting summary fields are bounded, stripped, and deduped."""
+        state = ConversationState(
+            product="  Plataforma de RH  ",
+            pain_points=[" folha manual ", "Folha manual", "", "x" * 200],
+            objections=[" caro "],
+            claims=[" Reduz fechamento em 30% "],
+        )
+
+        assert state.product == "Plataforma de RH"
+        assert state.pain_points == ["folha manual", "x" * 120]
+        assert state.objections == ["caro"]
+        assert state.claims == ["Reduz fechamento em 30%"]
 
     def test_validate_conversation_state_with_valid_dict(self):
         """Test validation with valid dict input."""
@@ -177,7 +199,11 @@ class TestLLMAnalysisResult:
                 "interesse": "medio",
                 "resistencia": "alta",
                 "objecoes_detectadas": ["preco"],
-                "engajamento": "medio"
+                "engajamento": "medio",
+                "product": "CRM",
+                "pain_points": ["Follow-up manual"],
+                "objections": ["Preço alto"],
+                "claims": ["Automatiza follow-up"],
             }
         }
         
@@ -187,6 +213,10 @@ class TestLLMAnalysisResult:
         assert result.confidence == 0.85
         assert result.feedback_type == "objection"
         assert result.estado.resistencia == "alta"
+        assert result.estado.product == "CRM"
+        assert result.estado.pain_points == ["Follow-up manual"]
+        assert result.estado.objections == ["Preço alto"]
+        assert result.estado.claims == ["Automatiza follow-up"]
 
     def test_validate_llm_response_with_missing_fields(self):
         """Test validation with missing fields."""

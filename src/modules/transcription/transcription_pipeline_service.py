@@ -26,6 +26,10 @@ from .transcription_service import TranscriptionService
 logger = logging.getLogger(__name__)
 
 
+def _is_host_role(role: object) -> bool:
+    return str(role or '').strip().lower() == 'host'
+
+
 class TranscriptionPipelineService:
     """Orchestrate STT, text analysis and feedback publishing."""
 
@@ -154,12 +158,18 @@ class TranscriptionPipelineService:
         )
         logger.info(f"[Step 3] Enviando transcrição para análise do Gemini")
         t_ana_start = time.perf_counter()
-        analysis = self._text_analysis_service.analyze(chunk)
+        is_host = _is_host_role(chunk.participant_role)
+        if is_host:
+            analysis = self._text_analysis_service.observe_context(chunk)
+        else:
+            analysis = self._text_analysis_service.analyze(chunk)
         self._apply_audio_window_stats(analysis, window_pcm, enriched_meta)
         t_ana_end = time.perf_counter()
         ANALYSIS_MS.observe((t_ana_end - t_ana_start) * 1000.0)
         t_pub_start = time.perf_counter()
-        published_enqueued = self._handle_transcript(stream_key, chunk, analysis)
+        published_enqueued = (
+            False if is_host else self._handle_transcript(stream_key, chunk, analysis)
+        )
         t_pub_end = time.perf_counter()
 
         if published_enqueued:
@@ -193,6 +203,7 @@ class TranscriptionPipelineService:
                 'enqueueMs': round(enqueue_ms, 1),
                 'totalMs': round(total_ms, 1),
                 'hasDirectFeedback': bool(analysis.direct_feedback),
+                'contextOnly': is_host,
                 'transcriptChars': len(chunk.text or ''),
             },
         )
@@ -228,13 +239,19 @@ class TranscriptionPipelineService:
         )
         logger.info("[Step 3] Enviando transcrição para análise do Gemini")
         t_ana_start = time.perf_counter()
-        analysis = self._text_analysis_service.analyze(chunk)
+        is_host = _is_host_role(chunk.participant_role)
+        if is_host:
+            analysis = self._text_analysis_service.observe_context(chunk)
+        else:
+            analysis = self._text_analysis_service.analyze(chunk)
         self._apply_streaming_audio_stats(analysis, audio_stats or {})
         t_ana_end = time.perf_counter()
         ANALYSIS_MS.observe((t_ana_end - t_ana_start) * 1000.0)
 
         t_pub_start = time.perf_counter()
-        published_enqueued = self._handle_transcript(stream_key, chunk, analysis)
+        published_enqueued = (
+            False if is_host else self._handle_transcript(stream_key, chunk, analysis)
+        )
         t_pub_end = time.perf_counter()
 
         if published_enqueued:
@@ -267,6 +284,7 @@ class TranscriptionPipelineService:
                 'enqueueMs': round(enqueue_ms, 1),
                 'totalMs': round(total_ms, 1),
                 'hasDirectFeedback': bool(analysis.direct_feedback),
+                'contextOnly': is_host,
                 'transcriptChars': len(chunk.text or ''),
             },
         )

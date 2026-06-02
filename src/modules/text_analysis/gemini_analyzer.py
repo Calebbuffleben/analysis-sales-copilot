@@ -69,7 +69,12 @@ class GeminiAnalyzer:
         self._consecutive_429_errors = 0
         self._backoff_until_ms = 0  # Don't call API until this timestamp
 
-    def analyze(self, text: str, conversation_state: Dict[str, Any]) -> Dict[str, Any]:
+    def analyze(
+        self,
+        text: str,
+        conversation_state: Dict[str, Any],
+        speaker_role: str = 'client',
+    ) -> Dict[str, Any]:
         """
         Send the transcribed text and current conversational state to Gemini.
         Returns a dict containing 'direct_feedback' (str), 'confidence' (float),
@@ -92,7 +97,7 @@ class GeminiAnalyzer:
                 f"Gemini API quota exhausted. Backoff for {remaining_sec:.1f}s"
             )
         
-        prompt = self._build_prompt(text, conversation_state)
+        prompt = self._build_prompt(text, conversation_state, speaker_role=speaker_role)
 
         try:
             response = self.client.models.generate_content(
@@ -210,17 +215,32 @@ class GeminiAnalyzer:
             'playbook_variables': {},
         }
 
-    def _build_prompt(self, text: str, state: Dict[str, Any]) -> str:
+    def _build_prompt(
+        self,
+        text: str,
+        state: Dict[str, Any],
+        speaker_role: str = 'client',
+    ) -> str:
         """Construct the LLM Prompt with the current conversation state and the new transcript.
         
         Uses few-shot learning examples to improve response consistency and quality.
         """
         state_str = json.dumps(state, ensure_ascii=False, indent=2)
+        normalized_role = 'host' if str(speaker_role).lower() == 'host' else 'client'
+        role_label = 'vendedor/host' if normalized_role == 'host' else 'cliente'
+        feedback_rule = (
+            'Este trecho é do vendedor/host: atualize o estado, mas responda sempre com '
+            '`feedback`: null, `confidence`: 0.0 e `feedback_type`: null.'
+            if normalized_role == 'host'
+            else 'Este trecho é do cliente: gere feedback somente quando o trecho do cliente justificar; use o estado apenas como contexto.'
+        )
         return f"""Você é um motor de IA de baixa latência agindo como um "co-piloto" tático para um representante comercial durante uma videochamada. Sua função é analisar trechos de conversas e fornecer feedbacks concisos e acionáveis.
 
 OBJETIVO: Analisar conversas de vendas em tempo real e fornecer feedback tático conciso para o vendedor.
 
 PRIORIDADE: Na maior parte dos trechos, concentre-se apenas em sinais táticos: objeção, oportunidade, rapport, fechamento, ou nenhuma intervenção (`feedback`: null). O texto do `feedback` não deve nomear metodologias de venda nem rotular "fases" de descoberta, **salvo** quando `fase_spin` no estado já não for `neutro` ou quando `alerta_risco_spin` for aplicável (campos opcionais descritos mais abaixo).
+
+PAPEL DO TRECHO ATUAL: {role_label}. {feedback_rule}
 
 # EXEMPLOS DE REFERÊNCIA (caminho principal — maioria dos trechos)
 
@@ -238,7 +258,11 @@ Resposta esperada:
     "engajamento": "medio",
     "fase_spin": "neutro",
     "proxima_pergunta_spin": "",
-    "alerta_risco_spin": false
+    "alerta_risco_spin": false,
+    "product": "",
+    "pain_points": [],
+    "objections": ["Achei caro comparado ao concorrente X"],
+    "claims": []
   }}
 }}
 
@@ -256,7 +280,11 @@ Resposta esperada:
     "engajamento": "alto",
     "fase_spin": "neutro",
     "proxima_pergunta_spin": "",
-    "alerta_risco_spin": false
+    "alerta_risco_spin": false,
+    "product": "",
+    "pain_points": [],
+    "objections": [],
+    "claims": []
   }}
 }}
 
@@ -274,7 +302,11 @@ Resposta esperada:
     "engajamento": "medio",
     "fase_spin": "neutro",
     "proxima_pergunta_spin": "",
-    "alerta_risco_spin": false
+    "alerta_risco_spin": false,
+    "product": "",
+    "pain_points": [],
+    "objections": [],
+    "claims": []
   }}
 }}
 
@@ -292,7 +324,11 @@ Resposta esperada:
     "engajamento": "baixo",
     "fase_spin": "neutro",
     "proxima_pergunta_spin": "",
-    "alerta_risco_spin": false
+    "alerta_risco_spin": false,
+    "product": "",
+    "pain_points": [],
+    "objections": ["Preciso pensar, me liga mês que vem"],
+    "claims": []
   }}
 }}
 
@@ -316,7 +352,11 @@ Resposta esperada:
     "engajamento": "medio",
     "fase_spin": "problema",
     "proxima_pergunta_spin": "Quanto isso custa em horas ou reais por mês para vocês?",
-    "alerta_risco_spin": false
+    "alerta_risco_spin": false,
+    "product": "",
+    "pain_points": ["Equipe perde um dia inteiro fechando a folha manualmente"],
+    "objections": [],
+    "claims": []
   }}
 }}
 
@@ -335,7 +375,11 @@ Resposta esperada:
     "engajamento": "medio",
     "fase_spin": "problema",
     "proxima_pergunta_spin": "Se nada mudar, qual o custo disso nos próximos 6 meses?",
-    "alerta_risco_spin": true
+    "alerta_risco_spin": true,
+    "product": "",
+    "pain_points": [],
+    "objections": [],
+    "claims": ["Proposta fechada com implantação na próxima semana"]
   }}
 }}
 
@@ -357,7 +401,11 @@ Resposta esperada (note `playbook_template_key` e `playbook_variables` na raiz):
     "engajamento": "medio",
     "fase_spin": "neutro",
     "proxima_pergunta_spin": "",
-    "alerta_risco_spin": false
+    "alerta_risco_spin": false,
+    "product": "",
+    "pain_points": [],
+    "objections": ["Produto do concorrente X está mais barato"],
+    "claims": []
   }}
 }}
 
@@ -382,6 +430,13 @@ Resposta esperada (note `playbook_template_key` e `playbook_variables` na raiz):
 # VALORES VÁLIDOS PARA fase_spin:
 - neutro | situacao | problema | implicacao | necessidade
 
+# CAMPOS DE RESUMO INCREMENTAL DA REUNIÃO:
+- `product`: produto/solução discutida; mantenha o valor anterior salvo quando o trecho trouxer um nome mais específico.
+- `pain_points`: dores explícitas do cliente, em frases curtas.
+- `objections`: objeções em linguagem livre, preservando contexto concreto.
+- `claims`: promessas, benefícios ou afirmações importantes ditas na call.
+- Adicione itens novos às listas; não apague itens já presentes no Estado Atual salvo correção explícita. O serviço fará dedup/cap.
+
 # INSTRUÇÕES:
 1. Primeiro identifique sinais táticos como nos exemplos 1–4; só depois avalie se os campos opcionais de fase (seção SPIN acima) se aplicam.
 2. Analise o "Novo Trecho" considerando o "Estado Atual da Conversa" (incluindo `fase_spin` anterior).
@@ -393,8 +448,9 @@ Resposta esperada (note `playbook_template_key` e `playbook_variables` na raiz):
    - 0.7-0.9: Sinal claro com bom contexto
    - 0.5-0.7: Sinal moderado, alguma ambiguidade
    - 0.0-0.5: Incerto, melhor não intervir
-7. Atualize o estado da conversa mantendo **todos** os campos do exemplo (interesse, resistencia, objecoes_detectadas, engajamento, fase_spin, proxima_pergunta_spin, alerta_risco_spin).
+7. Atualize o estado da conversa mantendo **todos** os campos do exemplo (interesse, resistencia, objecoes_detectadas, engajamento, fase_spin, proxima_pergunta_spin, alerta_risco_spin, product, pain_points, objections, claims).
 8. Transição de `fase_spin`: só com evidência; caso contrário mantenha o valor já presente no estado atual.
+9. Se o papel do trecho atual for vendedor/host, use o trecho apenas para enriquecer `product` e `claims`/contexto; não gere feedback.
 
 # PLAYBOOK (opcional — raiz do JSON, fora de `estado`)
 
@@ -407,7 +463,7 @@ Se não tiver certeza, omita ambos ou use `null`.
 ESTADO ATUAL DA CONVERSA:
 {state_str}
 
-NOVO TRECHO:
+NOVO TRECHO ({role_label}):
 "{text}"
 
 RESPONDA APENAS UM JSON VÁLIDO SEGUINDO O FORMATO DOS EXEMPLOS ACIMA.
