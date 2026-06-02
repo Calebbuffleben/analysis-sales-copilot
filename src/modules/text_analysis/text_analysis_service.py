@@ -43,6 +43,14 @@ from ...metrics.realtime_metrics import (
 
 logger = logging.getLogger(__name__)
 
+_MEETING_CONTEXT_LIST_FIELDS = (
+    'pain_points',
+    'objections',
+    'claims',
+    'objecoes_detectadas',
+)
+_MEETING_CONTEXT_MAX_ITEMS = 20
+
 
 def _playbook_hint_for_result_dict(analysis_result: Dict[str, Any]) -> str:
     """Build playbook_hint_json when confidence is high enough to trust the LLM hint."""
@@ -53,6 +61,51 @@ def _playbook_hint_for_result_dict(analysis_result: Dict[str, Any]) -> str:
         analysis_result.get('playbook_template_key'),
         analysis_result.get('playbook_variables'),
     )
+
+
+def _dedupe_preserve_order(items: list[Any]) -> list[Any]:
+    """Return a case-insensitive deduped list preserving first occurrence."""
+    out: list[Any] = []
+    seen: set[str] = set()
+    for item in items:
+        key = str(item).strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
+def _merge_conversation_state(
+    current_state: Dict[str, Any],
+    raw_next: Dict[str, Any],
+) -> ConversationState:
+    """Merge scalar state plus additive meeting-context lists."""
+    merged_state = {**current_state, **raw_next}
+
+    for field in _MEETING_CONTEXT_LIST_FIELDS:
+        prev = current_state.get(field) or []
+        new = raw_next.get(field) or []
+        if not isinstance(prev, list):
+            prev = [prev]
+        if not isinstance(new, list):
+            new = [new]
+        merged_state[field] = _dedupe_preserve_order(prev + new)[
+            :_MEETING_CONTEXT_MAX_ITEMS
+        ]
+
+    current_product = str(current_state.get('product') or '').strip()
+    next_product = str(raw_next.get('product') or '').strip()
+    if current_product and (
+        not next_product or len(next_product) < len(current_product)
+    ):
+        merged_state['product'] = current_product
+
+    return validate_conversation_state(merged_state)
+
+
+def _is_host_role(role: object) -> bool:
+    return str(role or '').strip().lower() == 'host'
 
 
 class _DeferredAnalysis:
@@ -209,6 +262,14 @@ class TextAnalysisService:
         slot: GeminiKeySlot,
     ) -> None:
         """Run the LLM analysis for a deferred chunk and publish if it has feedback."""
+        if _is_host_role(deferred.chunk.participant_role):
+            logger.info(
+                "Skipping deferred publish for host context | meeting=%s | participant=%s",
+                deferred.chunk.meeting_id,
+                deferred.chunk.participant_id,
+            )
+            return
+
         waited_ms = int(time.time() * 1000) - deferred.enqueued_at_ms
         logger.info(
             "Dispatching deferred analysis | meeting=%s | participant=%s | "
@@ -234,6 +295,14 @@ class TextAnalysisService:
         self, result: Dict[str, Any], chunk: TranscriptionChunk,
     ) -> None:
         """Publish a deferred analysis result via the existing publish dispatcher."""
+        if _is_host_role(chunk.participant_role):
+            logger.info(
+                "Skipping deferred host analysis publish | meeting=%s | participant=%s",
+                chunk.meeting_id,
+                chunk.participant_id,
+            )
+            return
+
         if not self._publish_dispatcher:
             logger.warning(
                 "Deferred analysis cannot be published — no publish_dispatcher available | meeting=%s",
@@ -259,7 +328,7 @@ class TextAnalysisService:
                 meeting_id=chunk.meeting_id,
                 participant_id=chunk.participant_id,
                 participant_name=None,
-                participant_role=None,
+                participant_role=chunk.participant_role or None,
                 feedback_type='text_analysis_ingress',
                 severity='info',
                 ts_ms=chunk.timestamp_ms,
@@ -308,7 +377,18 @@ class TextAnalysisService:
 
     def _get_context_key(self, chunk: TranscriptionChunk) -> str:
         """Generate a unique conversational context key."""
-        return f"{chunk.meeting_id}:{chunk.participant_id}"
+        tenant = (chunk.tenant_id or '').strip() or 'default'
+        return f"{tenant}:{chunk.meeting_id}"
+
+    def _get_current_state(self, context_key: str) -> Dict[str, Any]:
+        """Initialize and return a snapshot of the cached conversation state."""
+        with self._lock:
+            if context_key not in self._state:
+                self._state[context_key] = ConversationState.default_state().to_dict()
+                logger.info("Initialized new conversation state: %s", context_key)
+            current_state = dict(self._state[context_key])
+            self._touch_state(context_key)
+        return current_state
 
     def _cleanup_expired_states(self) -> int:
         """Remove expired states based on TTL."""
@@ -375,14 +455,7 @@ class TextAnalysisService:
         via the existing pipeline — nothing is lost.
         """
         context_key = self._get_context_key(chunk)
-
-        # Thread-safe state initialization
-        with self._lock:
-            if context_key not in self._state:
-                self._state[context_key] = ConversationState.default_state().to_dict()
-                logger.info("Initialized new conversation state: %s", context_key)
-            current_state = self._state[context_key]
-            self._touch_state(context_key)
+        current_state = self._get_current_state(context_key)
 
         # Check cache first
         cached_response = self._llm_cache.get(chunk.text)
@@ -399,7 +472,9 @@ class TextAnalysisService:
                 if not slot.try_acquire():
                     # Rate limit hit — enqueue, return fallback immediately
                     with self._rate_queue_lock:
-                        self._rate_queue.append(_DeferredAnalysis(chunk, current_state))
+                        self._rate_queue.append(
+                            _DeferredAnalysis(chunk, dict(current_state)),
+                        )
                         LLM_RATE_LIMITED_TOTAL.inc()
                         LLM_RATE_QUEUE_SIZE.set(len(self._rate_queue))
 
@@ -428,10 +503,15 @@ class TextAnalysisService:
                         chunk,
                         current_state,
                         slot.analyzer,
+                        speaker_role='client',
                     )
             else:
                 # Ollama mode — no rate limiting
-                analysis_result = self._call_llm_with_fallback(chunk, current_state)
+                analysis_result = self._call_llm_with_fallback(
+                    chunk,
+                    current_state,
+                    speaker_role='client',
+                )
 
         # Periodic state cleanup (every 100 calls)
         if not hasattr(self, '_analyze_counter'):
@@ -478,12 +558,12 @@ class TextAnalysisService:
         if direct_feedback:
             LLM_FEEDBACK_EMITTED_TOTAL.inc()
 
-        # Validate and update cached state (merge so partial LLM/fallback dicts keep prior fields, e.g. fase_spin)
+        # Validate and update cached state. List fields are additive so the
+        # meeting summary survives partial LLM responses across turns.
         raw_next = analysis_result.get('conversation_state')
         if not isinstance(raw_next, dict):
             raw_next = {}
-        merged_state = {**current_state, **raw_next}
-        new_state = validate_conversation_state(merged_state)
+        new_state = _merge_conversation_state(current_state, raw_next)
         with self._lock:
             self._state[context_key] = new_state.to_dict()
 
@@ -517,6 +597,69 @@ class TextAnalysisService:
 
         return result
 
+    def observe_context(self, chunk: TranscriptionChunk) -> TextAnalysisResult:
+        """Update meeting context from host speech without emitting feedback."""
+        context_key = self._get_context_key(chunk)
+        current_state = self._get_current_state(context_key)
+
+        if self._rate_limiter_enabled and self._gemini_pool is not None:
+            slot = self._gemini_pool.resolve_slot(chunk.tenant_id)
+            if slot.try_acquire():
+                analysis_result = self._call_llm_with_fallback(
+                    chunk,
+                    current_state,
+                    slot.analyzer,
+                    speaker_role='host',
+                )
+            else:
+                logger.warning(
+                    "RPM limit reached while observing host context; keeping prior state | "
+                    "meeting=%s | tenant=%s",
+                    chunk.meeting_id,
+                    chunk.tenant_id or 'default',
+                )
+                analysis_result = {
+                    'direct_feedback': '',
+                    'confidence': 0.0,
+                    'feedback_type': None,
+                    'conversation_state': current_state,
+                    'playbook_template_key': None,
+                    'playbook_variables': {},
+                }
+        else:
+            analysis_result = self._call_llm_with_fallback(
+                chunk,
+                current_state,
+                speaker_role='host',
+            )
+
+        raw_next = analysis_result.get('conversation_state')
+        if not isinstance(raw_next, dict):
+            raw_next = {}
+        new_state = _merge_conversation_state(current_state, raw_next)
+        state_dict = new_state.to_dict()
+        with self._lock:
+            self._state[context_key] = state_dict
+
+        logger.info(
+            "python.host_context_observed | meeting=%s | tenant=%s | "
+            "product=%s | pain_points=%d | objections=%d | claims=%d",
+            chunk.meeting_id,
+            chunk.tenant_id or 'default',
+            bool(state_dict.get('product')),
+            len(state_dict.get('pain_points') or []),
+            len(state_dict.get('objections') or []),
+            len(state_dict.get('claims') or []),
+        )
+
+        return TextAnalysisResult(
+            direct_feedback='',
+            confidence=0.0,
+            feedback_type=None,
+            conversation_state_json=json.dumps(state_dict, ensure_ascii=False),
+            playbook_hint_json='',
+        )
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -526,6 +669,7 @@ class TextAnalysisService:
         chunk: TranscriptionChunk,
         current_state: Dict[str, Any],
         analyzer: Optional[object] = None,
+        speaker_role: str = 'client',
     ) -> Dict[str, Any]:
         """Call the LLM with full fallback chain. Returns analysis dict."""
         llm_start_ms = time.time() * 1000
@@ -533,7 +677,12 @@ class TextAnalysisService:
         active_analyzer = analyzer or self.active_analyzer
 
         try:
-            analysis_result = active_analyzer.analyze(chunk.text, current_state)
+            analysis_result = self._analyze_with_role(
+                active_analyzer,
+                chunk.text,
+                current_state,
+                speaker_role,
+            )
             llm_duration_ms = time.time() * 1000 - llm_start_ms
             LLM_CALL_DURATION_MS.observe(llm_duration_ms)
 
@@ -635,7 +784,12 @@ class TextAnalysisService:
         llm_start_ms = time.time() * 1000
 
         try:
-            result = analyzer.analyze(text, current_state)
+            result = self._analyze_with_role(
+                analyzer,
+                text,
+                current_state,
+                'client',
+            )
             LLM_CALL_DURATION_MS.observe(time.time() * 1000 - llm_start_ms)
             if result.get('direct_feedback'):
                 self._llm_cache.put(text, result)
@@ -644,3 +798,18 @@ class TextAnalysisService:
             LLM_CALL_ERRORS_TOTAL.inc()
             logger.error("Deferred LLM analysis error: %s", e, exc_info=True)
             return None
+
+    def _analyze_with_role(
+        self,
+        analyzer: object,
+        text: str,
+        state: Dict[str, Any],
+        speaker_role: str,
+    ) -> Dict[str, Any]:
+        """Call analyzers with speaker_role while keeping old test doubles valid."""
+        try:
+            return analyzer.analyze(text, state, speaker_role=speaker_role)
+        except TypeError as exc:
+            if 'speaker_role' not in str(exc):
+                raise
+            return analyzer.analyze(text, state)

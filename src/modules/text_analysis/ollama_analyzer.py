@@ -88,12 +88,17 @@ class OllamaAnalyzer:
         else:
             logger.info(f"Model '{self.model}' is available in Ollama")
 
-    def analyze(self, text: str, conversation_state: Dict[str, Any]) -> Dict[str, Any]:
+    def analyze(
+        self,
+        text: str,
+        conversation_state: Dict[str, Any],
+        speaker_role: str = 'client',
+    ) -> Dict[str, Any]:
         """
         Analyze transcribed text using Ollama local model.
         Returns same format as GeminiAnalyzer for drop-in replacement.
         """
-        prompt = self._build_prompt(text, conversation_state)
+        prompt = self._build_prompt(text, conversation_state, speaker_role=speaker_role)
 
         try:
             start_time = time.time()
@@ -186,20 +191,34 @@ class OllamaAnalyzer:
             'playbook_variables': {},
         }
 
-    def _build_prompt(self, text: str, state: Dict[str, Any]) -> str:
+    def _build_prompt(
+        self,
+        text: str,
+        state: Dict[str, Any],
+        speaker_role: str = 'client',
+    ) -> str:
         """Build prompt optimized for local models (smaller context = faster).
         
         This prompt is simpler than Gemini's to work well with 7-8B parameter models.
         """
         state_str = json.dumps(state, ensure_ascii=False, indent=2)
+        normalized_role = 'host' if str(speaker_role).lower() == 'host' else 'client'
+        role_label = 'seller/host' if normalized_role == 'host' else 'client'
+        feedback_rule = (
+            'The current excerpt is from the seller/host: update estado only, and return feedback=null, confidence=0.0, feedback_type=null.'
+            if normalized_role == 'host'
+            else 'The current excerpt is from the client: only generate feedback when the client excerpt clearly justifies it.'
+        )
         return f"""You are an experienced sales assistant acting as a co-pilot for a sales representative during a video call.
 
 Analyze this sales conversation excerpt and provide tactical feedback.
 
+CURRENT SPEAKER ROLE: {role_label}. {feedback_rule}
+
 CURRENT CONVERSATION STATE:
 {state_str}
 
-NEW EXCERPT:
+NEW EXCERPT ({role_label}):
 "{text}"
 
 Respond ONLY with a valid JSON object in this exact format:
@@ -213,7 +232,14 @@ Respond ONLY with a valid JSON object in this exact format:
     "interesse": "baixo|medio|alto",
     "resistencia": "baixa|media|alta",
     "objecoes_detectadas": ["preco", "concorrente", "tempo", "confianca", "funcionalidade", "contrato", "implementacao", "roi"],
-    "engajamento": "baixo|medio|alto"
+    "engajamento": "baixo|medio|alto",
+    "fase_spin": "neutro|situacao|problema|implicacao|necessidade",
+    "proxima_pergunta_spin": "",
+    "alerta_risco_spin": false,
+    "product": "Product or solution being discussed, or empty string",
+    "pain_points": ["Short explicit customer pain points"],
+    "objections": ["Free-form concrete objections"],
+    "claims": ["Important claims, benefits, or promises stated in the call"]
   }}
 }}
 
@@ -224,6 +250,8 @@ Valid feedback types: objection, opportunity, rapport, closing, clarification, r
 
 Rules:
 - Only provide feedback when truly necessary (clear objection or buying signal)
+- If current role is seller/host, never provide feedback; only update estado.product, estado.claims, and other context fields.
+- Preserve prior product/pain_points/objections/claims and add new items incrementally; do not delete prior items unless explicitly corrected.
 - Be specific and actionable
 - Keep feedback to 1-2 sentences maximum
 - Self-evaluate confidence: 0.9-1.0 (very clear), 0.7-0.9 (clear), 0.5-0.7 (moderate), <0.5 (uncertain - use null feedback)

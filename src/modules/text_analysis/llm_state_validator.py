@@ -17,6 +17,9 @@ _VALID_FASE_SPIN = frozenset({"neutro", "situacao", "problema", "implicacao", "n
 
 # Max length for suggested SPIN question (prompt / UI safety)
 _PROXIMA_PERGUNTA_SPIN_MAX_LEN = 500
+_MEETING_PRODUCT_MAX_LEN = 200
+_MEETING_CONTEXT_ITEM_MAX_LEN = 120
+_MEETING_CONTEXT_MAX_ITEMS = 20
 
 # Aligned with backend PLAYBOOK_MAX_TEMPLATE_KEY_CHARS / payload caps
 _PLAYBOOK_MAX_TEMPLATE_KEY_CHARS = 64
@@ -127,6 +130,22 @@ class ConversationState(BaseModel):
         default=False,
         description="True when seller skips SPIN steps (e.g. solution before problem/implication)",
     )
+    product: str = Field(
+        default="",
+        description="Product or solution being discussed in the meeting",
+    )
+    pain_points: list[str] = Field(
+        default_factory=list,
+        description="Explicit customer pain points accumulated across the meeting",
+    )
+    objections: list[str] = Field(
+        default_factory=list,
+        description="Free-form objections accumulated across the meeting",
+    )
+    claims: list[str] = Field(
+        default_factory=list,
+        description="Benefits, claims, or promises stated during the meeting",
+    )
 
     @field_validator("fase_spin", mode="before")
     @classmethod
@@ -153,6 +172,38 @@ class ConversationState(BaseModel):
         if v is True or v == 1 or str(v).lower() in ("true", "1", "yes"):
             return True
         return False
+
+    @field_validator("product")
+    @classmethod
+    def truncate_product(cls, v: str) -> str:
+        s = (v or "").strip()
+        if len(s) > _MEETING_PRODUCT_MAX_LEN:
+            return s[:_MEETING_PRODUCT_MAX_LEN]
+        return s
+
+    @field_validator("pain_points", "objections", "claims", mode="before")
+    @classmethod
+    def normalize_context_list(cls, v) -> list[str]:
+        """Coerce meeting-context lists to short, bounded, deduped strings."""
+        if not v:
+            return []
+        items = v if isinstance(v, list) else [v]
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            s = str(item).strip()
+            if not s:
+                continue
+            if len(s) > _MEETING_CONTEXT_ITEM_MAX_LEN:
+                s = s[:_MEETING_CONTEXT_ITEM_MAX_LEN]
+            key = s.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(s)
+            if len(out) >= _MEETING_CONTEXT_MAX_ITEMS:
+                break
+        return out
 
     @field_validator("objecoes_detectadas")
     @classmethod
@@ -196,6 +247,10 @@ class ConversationState(BaseModel):
             "fase_spin": self.fase_spin,
             "proxima_pergunta_spin": self.proxima_pergunta_spin,
             "alerta_risco_spin": self.alerta_risco_spin,
+            "product": self.product,
+            "pain_points": self.pain_points,
+            "objections": self.objections,
+            "claims": self.claims,
         }
     
     @classmethod

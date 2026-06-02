@@ -13,3 +13,17 @@ def test_build_prompt_no_fstring_value_error():
     )
     assert "playbook_variables" in prompt
     assert '{"competidor": "Concorrente X", "produto": "Suite Pro"}' in prompt
+    assert "pain_points" in prompt
+    assert "claims" in prompt
+
+
+def test_build_prompt_marks_host_context_only():
+    analyzer = GeminiAnalyzer.__new__(GeminiAnalyzer)
+    prompt = analyzer._build_prompt(
+        "Nossa solução reduz o tempo de implantação.",
+        ConversationState.default_state().to_dict(),
+        speaker_role="host",
+    )
+
+    assert "PAPEL DO TRECHO ATUAL: vendedor/host" in prompt
+    assert "`feedback`: null" in prompt
