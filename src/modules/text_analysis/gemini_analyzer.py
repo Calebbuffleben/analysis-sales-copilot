@@ -27,25 +27,26 @@ class QuotaExhaustedError(Exception):
     pass
 
 
-def uses_rest_developer_api(api_key: str) -> bool:
-    """Return True when the key must bypass google-genai and use REST directly."""
+def uses_vertex_express_api(api_key: str) -> bool:
+    """Return True for Vertex AI Express keys (``AQ.…`` prefix from AI Studio)."""
     return (api_key or '').strip().startswith('AQ.')
 
 
-def create_genai_client(api_key: str, *, slot_index: Optional[int] = None) -> Any:
-    """Create a google-genai client for legacy ``AIza…`` AI Studio keys.
+# Backwards-compatible alias used by tests and callers.
+uses_rest_developer_api = uses_vertex_express_api
 
-    New ``AQ.…`` keys must call ``generativelanguage.googleapis.com`` with the
-    ``x-goog-api-key`` header only. The SDK routes them to
-    ``aiplatform.googleapis.com`` when ``vertexai=True`` (OAuth required) or may
-    send Bearer auth on the Developer API — both yield
-    ``ACCESS_TOKEN_TYPE_UNSUPPORTED``. Those keys use REST via
-    :meth:`GeminiAnalyzer._rest_generate_content` instead.
+
+def create_genai_client(api_key: str, *, slot_index: Optional[int] = None) -> Any:
+    """Create a google-genai client for legacy ``AIza…`` Developer API keys.
+
+    ``AQ.…`` keys are Vertex AI Express credentials. They must call
+    ``aiplatform.googleapis.com/v1/publishers/google/models/...?key=`` via
+    :meth:`GeminiAnalyzer._rest_generate_content`, not ``generativelanguage``.
     """
     normalized = (api_key or '').strip()
-    if uses_rest_developer_api(normalized):
+    if uses_vertex_express_api(normalized):
         logger.info(
-            'Gemini transport | mode=rest_developer_api | slot=%s | key_prefix=%s',
+            'Gemini transport | mode=vertex_express_rest | slot=%s | key_prefix=%s',
             slot_index,
             normalized[:8] + '...',
         )
@@ -85,14 +86,14 @@ class GeminiAnalyzer:
                 ) from exc
 
             self._api_key = (api_key or '').strip()
-            self._use_rest_transport = uses_rest_developer_api(self._api_key)
+            self._use_rest_transport = uses_vertex_express_api(self._api_key)
             client = create_genai_client(api_key, slot_index=slot_index)
             self._generation_config_factory = (
                 None if self._use_rest_transport else types.GenerateContentConfig
             )
         else:
             self._api_key = (api_key or '').strip()
-            self._use_rest_transport = uses_rest_developer_api(self._api_key)
+            self._use_rest_transport = uses_vertex_express_api(self._api_key)
             self._generation_config_factory = None
 
         self.client = client
@@ -244,21 +245,19 @@ class GeminiAnalyzer:
         return self._generation_config_factory(**kwargs)
 
     def _rest_generate_content(self, prompt: str) -> str:
-        """Call Gemini Developer API with x-goog-api-key (AQ. keys)."""
+        """Call Vertex AI Express REST API (``AQ.…`` keys)."""
         import requests
 
         url = (
-            'https://generativelanguage.googleapis.com/v1beta/models/'
+            'https://aiplatform.googleapis.com/v1/publishers/google/models/'
             f'{self.model_name}:generateContent'
         )
         response = requests.post(
             url,
-            headers={
-                'Content-Type': 'application/json',
-                'x-goog-api-key': self._api_key,
-            },
+            params={'key': self._api_key},
+            headers={'Content-Type': 'application/json'},
             json={
-                'contents': [{'parts': [{'text': prompt}]}],
+                'contents': [{'role': 'user', 'parts': [{'text': prompt}]}],
                 'generationConfig': {
                     'responseMimeType': 'application/json',
                     'temperature': 0.2,
@@ -266,7 +265,14 @@ class GeminiAnalyzer:
             },
             timeout=60,
         )
-        response.raise_for_status()
+        if not response.ok:
+            logger.error(
+                'Vertex express generateContent failed | slot=%s | status=%s | body=%s',
+                self._slot_index,
+                response.status_code,
+                response.text[:500],
+            )
+            response.raise_for_status()
         payload = response.json()
         candidates = payload.get('candidates') or []
         if not candidates:

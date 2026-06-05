@@ -9,7 +9,7 @@ import pytest
 from src.modules.text_analysis.gemini_analyzer import (
     GeminiAnalyzer,
     create_genai_client,
-    uses_rest_developer_api,
+    uses_vertex_express_api,
 )
 
 
@@ -21,9 +21,9 @@ def mock_genai_module(monkeypatch):
     return mock_genai
 
 
-def test_uses_rest_developer_api_for_aq_prefix() -> None:
-    assert uses_rest_developer_api('AQ.Ab8RN6Example') is True
-    assert uses_rest_developer_api('AIzaSyExample') is False
+def test_uses_vertex_express_api_for_aq_prefix() -> None:
+    assert uses_vertex_express_api('AQ.Ab8RN6Example') is True
+    assert uses_vertex_express_api('AIzaSyExample') is False
 
 
 def test_create_genai_client_legacy_aiza_key(mock_genai_module) -> None:
@@ -67,12 +67,14 @@ def test_gemini_analyzer_aq_key_uses_rest_transport() -> None:
     assert result['direct_feedback'] == ''
 
 
-def test_rest_generate_content_sends_x_goog_api_key() -> None:
+def test_rest_generate_content_uses_vertex_express_endpoint() -> None:
     analyzer = GeminiAnalyzer.__new__(GeminiAnalyzer)
     analyzer._api_key = 'AQ.secret-key'
     analyzer.model_name = 'gemini-2.5-flash'
+    analyzer._slot_index = 2
 
     mock_response = MagicMock()
+    mock_response.ok = True
     mock_response.json.return_value = {
         'candidates': [{'content': {'parts': [{'text': '{"feedback": null}'}]}}],
     }
@@ -83,7 +85,8 @@ def test_rest_generate_content_sends_x_goog_api_key() -> None:
 
     assert text == '{"feedback": null}'
     post.assert_called_once()
-    _, kwargs = post.call_args
-    assert kwargs['headers']['x-goog-api-key'] == 'AQ.secret-key'
+    url = post.call_args[0][0]
+    kwargs = post.call_args[1]
+    assert 'aiplatform.googleapis.com/v1/publishers/google/models/' in url
+    assert kwargs['params']['key'] == 'AQ.secret-key'
     assert 'Authorization' not in kwargs['headers']
-    assert 'generativelanguage.googleapis.com' in post.call_args[0][0]
