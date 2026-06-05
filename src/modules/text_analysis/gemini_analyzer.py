@@ -27,26 +27,33 @@ class QuotaExhaustedError(Exception):
     pass
 
 
+def uses_rest_developer_api(api_key: str) -> bool:
+    """Return True when the key must bypass google-genai and use REST directly."""
+    return (api_key or '').strip().startswith('AQ.')
+
+
 def create_genai_client(api_key: str, *, slot_index: Optional[int] = None) -> Any:
-    """Create a google-genai client for Google AI Studio API keys.
+    """Create a google-genai client for legacy ``AIza…`` AI Studio keys.
 
-    AI Studio now issues two key shapes:
-    - ``AIza…`` — Gemini Developer API (default client mode)
-    - ``AQ.…`` — Vertex AI Express; needs ``vertexai=True`` so the SDK sends
-      ``x-goog-api-key`` instead of treating the key as an OAuth Bearer token
-      (which yields ACCESS_TOKEN_TYPE_UNSUPPORTED on generateContent).
+    New ``AQ.…`` keys must call ``generativelanguage.googleapis.com`` with the
+    ``x-goog-api-key`` header only. The SDK routes them to
+    ``aiplatform.googleapis.com`` when ``vertexai=True`` (OAuth required) or may
+    send Bearer auth on the Developer API — both yield
+    ``ACCESS_TOKEN_TYPE_UNSUPPORTED``. Those keys use REST via
+    :meth:`GeminiAnalyzer._rest_generate_content` instead.
     """
-    from google import genai
-
     normalized = (api_key or '').strip()
-    if normalized.startswith('AQ.'):
+    if uses_rest_developer_api(normalized):
         logger.info(
-            'Gemini client | mode=vertex_express | slot=%s | key_prefix=%s',
+            'Gemini transport | mode=rest_developer_api | slot=%s | key_prefix=%s',
             slot_index,
             normalized[:8] + '...',
         )
-        return genai.Client(api_key=normalized, vertexai=True)
-    return genai.Client(api_key=normalized)
+        return None
+
+    from google import genai
+
+    return genai.Client(api_key=normalized, vertexai=False)
 
 
 class GeminiAnalyzer:
@@ -77,9 +84,15 @@ class GeminiAnalyzer:
                     'Install python-service requirements before starting.',
                 ) from exc
 
+            self._api_key = (api_key or '').strip()
+            self._use_rest_transport = uses_rest_developer_api(self._api_key)
             client = create_genai_client(api_key, slot_index=slot_index)
-            self._generation_config_factory = types.GenerateContentConfig
+            self._generation_config_factory = (
+                None if self._use_rest_transport else types.GenerateContentConfig
+            )
         else:
+            self._api_key = (api_key or '').strip()
+            self._use_rest_transport = uses_rest_developer_api(self._api_key)
             self._generation_config_factory = None
 
         self.client = client
@@ -122,21 +135,25 @@ class GeminiAnalyzer:
         prompt = self._build_prompt(text, conversation_state, speaker_role=speaker_role)
 
         try:
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=self._generation_config(
-                    response_mime_type="application/json",
-                    temperature=0.2,
+            if self._use_rest_transport:
+                response_text = self._rest_generate_content(prompt)
+            else:
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=self._generation_config(
+                        response_mime_type="application/json",
+                        temperature=0.2,
+                    )
                 )
-            )
+                response_text = response.text or ''
 
-            if not response.text:
+            if not response_text:
                 logger.error("Gemini returned an empty response text.")
                 return self._default_response(conversation_state)
 
             # Parse and validate the JSON response
-            raw_data = json.loads(response.text)
+            raw_data = json.loads(response_text)
             validated = validate_llm_response(raw_data)
 
             # SUCCESS: Reset backoff counter
@@ -225,6 +242,38 @@ class GeminiAnalyzer:
         if self._generation_config_factory is None:
             return kwargs
         return self._generation_config_factory(**kwargs)
+
+    def _rest_generate_content(self, prompt: str) -> str:
+        """Call Gemini Developer API with x-goog-api-key (AQ. keys)."""
+        import requests
+
+        url = (
+            'https://generativelanguage.googleapis.com/v1beta/models/'
+            f'{self.model_name}:generateContent'
+        )
+        response = requests.post(
+            url,
+            headers={
+                'Content-Type': 'application/json',
+                'x-goog-api-key': self._api_key,
+            },
+            json={
+                'contents': [{'parts': [{'text': prompt}]}],
+                'generationConfig': {
+                    'responseMimeType': 'application/json',
+                    'temperature': 0.2,
+                },
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        candidates = payload.get('candidates') or []
+        if not candidates:
+            return ''
+        parts = (candidates[0].get('content') or {}).get('parts') or []
+        texts = [part.get('text', '') for part in parts if isinstance(part, dict)]
+        return ''.join(texts).strip()
             
     def _default_response(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """Return a safe fallback if Gemini fails."""
