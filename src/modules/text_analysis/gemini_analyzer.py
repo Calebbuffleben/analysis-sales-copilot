@@ -27,6 +27,28 @@ class QuotaExhaustedError(Exception):
     pass
 
 
+def create_genai_client(api_key: str, *, slot_index: Optional[int] = None) -> Any:
+    """Create a google-genai client for Google AI Studio API keys.
+
+    AI Studio now issues two key shapes:
+    - ``AIza…`` — Gemini Developer API (default client mode)
+    - ``AQ.…`` — Vertex AI Express; needs ``vertexai=True`` so the SDK sends
+      ``x-goog-api-key`` instead of treating the key as an OAuth Bearer token
+      (which yields ACCESS_TOKEN_TYPE_UNSUPPORTED on generateContent).
+    """
+    from google import genai
+
+    normalized = (api_key or '').strip()
+    if normalized.startswith('AQ.'):
+        logger.info(
+            'Gemini client | mode=vertex_express | slot=%s | key_prefix=%s',
+            slot_index,
+            normalized[:8] + '...',
+        )
+        return genai.Client(api_key=normalized, vertexai=True)
+    return genai.Client(api_key=normalized)
+
+
 class GeminiAnalyzer:
     """Analyze transcription texts and manage conversation state using Gemini Flash.
     
@@ -55,7 +77,7 @@ class GeminiAnalyzer:
                     'Install python-service requirements before starting.',
                 ) from exc
 
-            client = genai.Client(api_key=api_key)
+            client = create_genai_client(api_key, slot_index=slot_index)
             self._generation_config_factory = types.GenerateContentConfig
         else:
             self._generation_config_factory = None
