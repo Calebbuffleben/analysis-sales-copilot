@@ -6,6 +6,12 @@ import re
 import time
 from typing import Any, Dict, Optional
 
+from .gemini_transport import (
+    GeminiTransportMode,
+    generate_with_transport_chain,
+    is_auth_error_message,
+    key_prefix,
+)
 from .llm_state_validator import (
     validate_llm_response,
 )
@@ -36,27 +42,6 @@ def uses_vertex_express_api(api_key: str) -> bool:
 uses_rest_developer_api = uses_vertex_express_api
 
 
-def create_genai_client(api_key: str, *, slot_index: Optional[int] = None) -> Any:
-    """Create a google-genai client for legacy ``AIza…`` Developer API keys.
-
-    ``AQ.…`` keys are Vertex AI Express credentials. They must call
-    ``aiplatform.googleapis.com/v1/publishers/google/models/...?key=`` via
-    :meth:`GeminiAnalyzer._rest_generate_content`, not ``generativelanguage``.
-    """
-    normalized = (api_key or '').strip()
-    if uses_vertex_express_api(normalized):
-        logger.info(
-            'Gemini transport | mode=vertex_express_rest | slot=%s | key_prefix=%s',
-            slot_index,
-            normalized[:8] + '...',
-        )
-        return None
-
-    from google import genai
-
-    return genai.Client(api_key=normalized, vertexai=False)
-
-
 class GeminiAnalyzer:
     """Analyze transcription texts and manage conversation state using Gemini Flash.
     
@@ -73,33 +58,29 @@ class GeminiAnalyzer:
         client: Optional[Any] = None,
         slot_index: Optional[int] = None,
     ):
-        if client is None:
-            if not api_key:
-                logger.warning("No Gemini API key provided. Analysis might fail if not injected properly.")
+        self._api_key = (api_key or '').strip()
+        self.model_name = model_name
+        self._slot_index = slot_index
+        self._api_key_prefix = key_prefix(self._api_key)
+        self._cached_transport: Optional[GeminiTransportMode] = None
+        self.client = client
+
+        if client is not None:
             try:
-                from google import genai
                 from google.genai import types
+
+                self._generation_config_factory = types.GenerateContentConfig
             except Exception as exc:
                 raise RuntimeError(
                     'google-genai is required for Gemini analysis. '
                     'Install python-service requirements before starting.',
                 ) from exc
-
-            self._api_key = (api_key or '').strip()
-            self._use_rest_transport = uses_vertex_express_api(self._api_key)
-            client = create_genai_client(api_key, slot_index=slot_index)
-            self._generation_config_factory = (
-                None if self._use_rest_transport else types.GenerateContentConfig
-            )
         else:
-            self._api_key = (api_key or '').strip()
-            self._use_rest_transport = uses_vertex_express_api(self._api_key)
+            if not self._api_key:
+                logger.warning(
+                    'No Gemini API key provided. Analysis might fail if not injected properly.',
+                )
             self._generation_config_factory = None
-
-        self.client = client
-        self.model_name = model_name
-        self._slot_index = slot_index
-        self._api_key_prefix = (api_key[:8] + '...') if len(api_key) > 8 else 'unset'
 
         # Quota protection: track consecutive 429 errors
         self._consecutive_429_errors = 0
@@ -136,18 +117,25 @@ class GeminiAnalyzer:
         prompt = self._build_prompt(text, conversation_state, speaker_role=speaker_role)
 
         try:
-            if self._use_rest_transport:
-                response_text = self._rest_generate_content(prompt)
-            else:
+            if self.client is not None:
                 response = self.client.models.generate_content(
                     model=self.model_name,
                     contents=prompt,
                     config=self._generation_config(
                         response_mime_type="application/json",
                         temperature=0.2,
-                    )
+                    ),
                 )
                 response_text = response.text or ''
+            else:
+                response_text, transport = generate_with_transport_chain(
+                    api_key=self._api_key,
+                    model_name=self.model_name,
+                    prompt=prompt,
+                    preferred_mode=self._cached_transport,
+                    slot_index=self._slot_index,
+                )
+                self._cached_transport = transport
 
             if not response_text:
                 logger.error("Gemini returned an empty response text.")
@@ -182,23 +170,17 @@ class GeminiAnalyzer:
         except Exception as e:
             error_message = str(e)
 
-            if (
-                'API_KEY_INVALID' in error_message
-                or 'API key not valid' in error_message
-                or (
-                    'INVALID_ARGUMENT' in error_message
-                    and 'API key' in error_message.lower()
-                )
+            if is_auth_error_message(error_message) or (
+                'INVALID_ARGUMENT' in error_message
+                and 'API key' in error_message.lower()
             ):
                 logger.error(
-                    'Gemini rejected API key | slot=%s | key_prefix=%s | '
-                    'If you have multiple keys, use GEMINI_API_KEYS=key1,key2 '
-                    '(not a comma-separated GEMINI_API_KEY).',
+                    'Gemini auth failed for slot=%s prefix=%s — pool failover may retry another key',
                     self._slot_index,
                     self._api_key_prefix,
                 )
                 raise InvalidGeminiApiKeyError(
-                    'Gemini API key is invalid for this slot',
+                    f'Gemini authentication failed for slot {self._slot_index}',
                 ) from e
 
             # Detect 429 quota exceeded errors
@@ -244,43 +226,6 @@ class GeminiAnalyzer:
             return kwargs
         return self._generation_config_factory(**kwargs)
 
-    def _rest_generate_content(self, prompt: str) -> str:
-        """Call Vertex AI Express REST API (``AQ.…`` keys)."""
-        import requests
-
-        url = (
-            'https://aiplatform.googleapis.com/v1/publishers/google/models/'
-            f'{self.model_name}:generateContent'
-        )
-        response = requests.post(
-            url,
-            params={'key': self._api_key},
-            headers={'Content-Type': 'application/json'},
-            json={
-                'contents': [{'role': 'user', 'parts': [{'text': prompt}]}],
-                'generationConfig': {
-                    'responseMimeType': 'application/json',
-                    'temperature': 0.2,
-                },
-            },
-            timeout=60,
-        )
-        if not response.ok:
-            logger.error(
-                'Vertex express generateContent failed | slot=%s | status=%s | body=%s',
-                self._slot_index,
-                response.status_code,
-                response.text[:500],
-            )
-            response.raise_for_status()
-        payload = response.json()
-        candidates = payload.get('candidates') or []
-        if not candidates:
-            return ''
-        parts = (candidates[0].get('content') or {}).get('parts') or []
-        texts = [part.get('text', '') for part in parts if isinstance(part, dict)]
-        return ''.join(texts).strip()
-            
     def _default_response(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """Return a safe fallback if Gemini fails."""
         return {
