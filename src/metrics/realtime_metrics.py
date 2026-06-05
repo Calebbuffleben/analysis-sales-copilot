@@ -171,6 +171,31 @@ WINDOW_SKIPPED_EMPTY_TOTAL = _metric_or_noop(
     'Total ready windows skipped because STT returned empty transcript.',
 )
 
+AUDIO_CHUNKS_RECEIVED_TOTAL = _metric_or_noop(
+    Counter,
+    'audio_chunks_received_total',
+    'Total gRPC audio chunks received by the Python service.',
+)
+
+AUDIO_CHUNKS_PROCESSED_TOTAL = _metric_or_noop(
+    Counter,
+    'audio_chunks_processed_total',
+    'Total gRPC audio chunks accepted by AudioService.process_chunk.',
+)
+
+PIPELINE_QUEUE_SIZE = _metric_or_noop(
+    Gauge,
+    'pipeline_queue_size',
+    'Coarse operational queue size for admin dashboard (active streams / backlog proxy).',
+)
+
+PIPELINE_LATENCY_MS = _metric_or_noop(
+    Histogram,
+    'pipeline_latency_ms',
+    'End-to-end operational pipeline latency (ms) for admin dashboard.',
+    buckets=(50, 100, 250, 500, 1000, 2000, 4000, 8000, 15000),
+)
+
 ASSEMBLYAI_SESSIONS_OPEN = _metric_or_noop(
     Gauge,
     'assemblyai_sessions_open',
@@ -193,6 +218,18 @@ ASSEMBLYAI_AUDIO_BYTES_SENT_TOTAL = _metric_or_noop(
     Counter,
     'assemblyai_audio_bytes_sent_total',
     'Total PCM audio bytes sent to AssemblyAI streaming.',
+)
+
+ASSEMBLYAI_BILLABLE_SECONDS_TOTAL = _metric_or_noop(
+    Counter,
+    'assemblyai_billable_seconds_total',
+    'Estimated billable audio seconds sent to AssemblyAI.',
+)
+
+ASSEMBLYAI_ESTIMATED_COST_USD_TOTAL = _metric_or_noop(
+    Counter,
+    'assemblyai_estimated_cost_usd_total',
+    'Estimated AssemblyAI cost in USD.',
 )
 
 ASSEMBLYAI_TURNS_TOTAL = _metric_or_noop(
@@ -270,6 +307,24 @@ LLM_CALL_DURATION_MS = _metric_or_noop(
     'llm_call_duration_ms',
     'Gemini API call latency (ms).',
     buckets=(100, 200, 500, 1000, 2000, 3000, 5000, 10000, 20000),
+)
+
+GEMINI_ESTIMATED_COST_USD_TOTAL = _metric_or_noop(
+    Counter,
+    'gemini_estimated_cost_usd_total',
+    'Estimated Gemini API cost in USD when token usage is available.',
+)
+
+GEMINI_RPM_CURRENT = _metric_or_noop(
+    Gauge,
+    'gemini_rpm_current',
+    'Current Gemini requests per minute estimate.',
+)
+
+GEMINI_RPM_LIMIT = _metric_or_noop(
+    Gauge,
+    'gemini_rpm_limit',
+    'Configured Gemini requests per minute limit.',
 )
 
 LLM_CONFIDENCE_SCORE = _metric_or_noop(
