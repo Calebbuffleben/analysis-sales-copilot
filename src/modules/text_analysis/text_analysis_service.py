@@ -499,11 +499,12 @@ class TextAnalysisService:
                     # background thread and published separately.
                 else:
                     # Within RPM limit — call Gemini now, record timestamp
-                    analysis_result = self._call_llm_with_fallback(
+                    analysis_result = self._call_llm_with_pool_failover(
                         chunk,
                         current_state,
-                        slot.analyzer,
+                        chunk.tenant_id,
                         speaker_role='client',
+                        rpm_slot=slot,
                     )
             else:
                 # Ollama mode — no rate limiting
@@ -605,11 +606,12 @@ class TextAnalysisService:
         if self._rate_limiter_enabled and self._gemini_pool is not None:
             slot = self._gemini_pool.resolve_slot(chunk.tenant_id)
             if slot.try_acquire():
-                analysis_result = self._call_llm_with_fallback(
+                analysis_result = self._call_llm_with_pool_failover(
                     chunk,
                     current_state,
-                    slot.analyzer,
+                    chunk.tenant_id,
                     speaker_role='host',
+                    rpm_slot=slot,
                 )
             else:
                 logger.warning(
@@ -664,12 +666,62 @@ class TextAnalysisService:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _call_llm_with_pool_failover(
+        self,
+        chunk: TranscriptionChunk,
+        current_state: Dict[str, Any],
+        tenant_id: str | None,
+        *,
+        speaker_role: str = 'client',
+        rpm_slot: Optional[GeminiKeySlot] = None,
+    ) -> Dict[str, Any]:
+        """Sticky slot first; on auth failure try other pool keys (e.g. AIza fallback)."""
+        if self._gemini_pool is None:
+            return self._call_llm_with_fallback(
+                chunk,
+                current_state,
+                speaker_role=speaker_role,
+            )
+
+        ordered = list(self._gemini_pool.resolve_slots_ordered(tenant_id))
+        if rpm_slot is not None:
+            ordered = [rpm_slot] + [s for s in ordered if s.index != rpm_slot.index]
+
+        for attempt, slot in enumerate(ordered):
+            try:
+                if attempt > 0:
+                    logger.warning(
+                        'Gemini pool failover | tenant=%s | trying_slot=%s',
+                        tenant_id or 'default',
+                        slot.index,
+                    )
+                return self._call_llm_with_fallback(
+                    chunk,
+                    current_state,
+                    slot.analyzer,
+                    speaker_role=speaker_role,
+                    propagate_auth_errors=True,
+                )
+            except InvalidGeminiApiKeyError:
+                continue
+
+        logger.error(
+            'All Gemini pool slots exhausted auth transports | tenant=%s',
+            tenant_id or 'default',
+        )
+        return self._call_llm_with_fallback(
+            chunk,
+            current_state,
+            speaker_role=speaker_role,
+        )
+
     def _call_llm_with_fallback(
         self,
         chunk: TranscriptionChunk,
         current_state: Dict[str, Any],
         analyzer: Optional[object] = None,
         speaker_role: str = 'client',
+        propagate_auth_errors: bool = False,
     ) -> Dict[str, Any]:
         """Call the LLM with full fallback chain. Returns analysis dict."""
         llm_start_ms = time.time() * 1000
@@ -701,6 +753,8 @@ class TextAnalysisService:
             return analysis_result
 
         except (QuotaExhaustedError, InvalidGeminiApiKeyError) as e:
+            if isinstance(e, InvalidGeminiApiKeyError) and propagate_auth_errors:
+                raise
             llm_duration_ms = time.time() * 1000 - llm_start_ms
             LLM_CALL_DURATION_MS.observe(llm_duration_ms)
             LLM_CALL_ERRORS_TOTAL.inc()

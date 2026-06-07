@@ -20,7 +20,7 @@ from .gemini_analyzer import GeminiAnalyzer
 
 logger = logging.getLogger(__name__)
 
-AnalyzerFactory = Callable[[str, str], GeminiAnalyzer]
+AnalyzerFactory = Callable[[str, str, int], GeminiAnalyzer]
 
 
 @dataclass
@@ -99,7 +99,7 @@ class GeminiKeyPool:
                 model_name=model,
                 slot_index=index,
             )
-        )
+        )  # noqa: E731 — small factory for default analyzer wiring
         keys = settings.effective_gemini_api_keys()
         if (
             settings.gemini_api_key
@@ -147,7 +147,15 @@ class GeminiKeyPool:
         return self._slots
 
     def resolve_slot(self, tenant_id: str | None) -> GeminiKeySlot:
+        return self.resolve_slots_ordered(tenant_id)[0]
+
+    def resolve_slots_ordered(self, tenant_id: str | None) -> tuple[GeminiKeySlot, ...]:
+        """Sticky primary slot, then remaining keys for auth failover."""
         routing_key = (tenant_id or 'default').strip() or 'default'
         digest = hashlib.sha256(routing_key.encode('utf-8')).hexdigest()
-        slot_index = int(digest[:8], 16) % len(self._slots)
-        return self._slots[slot_index]
+        primary_idx = int(digest[:8], 16) % len(self._slots)
+        primary = self._slots[primary_idx]
+        fallbacks = tuple(
+            slot for slot in self._slots if slot is not primary
+        )
+        return (primary, *fallbacks)

@@ -13,6 +13,11 @@ import audio_pipeline_pb2
 import audio_pipeline_pb2_grpc
 
 from ..services.audio_service import AudioService
+from ..metrics.realtime_metrics import (
+    AUDIO_CHUNKS_PROCESSED_TOTAL,
+    AUDIO_CHUNKS_RECEIVED_TOTAL,
+    PIPELINE_QUEUE_SIZE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +53,7 @@ class AudioPipelineServicer(audio_pipeline_pb2_grpc.AudioPipelineServiceServicer
         try:
             for chunk in request_iterator:
                 chunks_received += 1
+                AUDIO_CHUNKS_RECEIVED_TOTAL.inc()
 
                 # Start stream on first chunk
                 if chunks_received == 1:
@@ -86,6 +92,8 @@ class AudioPipelineServicer(audio_pipeline_pb2_grpc.AudioPipelineServiceServicer
                     tenant_id=getattr(chunk, 'tenant_id', '') or '',
                     participant_role=getattr(chunk, 'participant_role', '') or '',
                 )
+                AUDIO_CHUNKS_PROCESSED_TOTAL.inc()
+                PIPELINE_QUEUE_SIZE.set(1 if stream_started else 0)
 
                 # TODO: Integrate with the audio buffering pipeline.
                 # The AudioService (and the audio_buffer module) should:
@@ -107,6 +115,7 @@ class AudioPipelineServicer(audio_pipeline_pb2_grpc.AudioPipelineServiceServicer
                     participant_id,
                     chunks_received,
                 )
+                PIPELINE_QUEUE_SIZE.set(0)
 
             # TODO: Consider returning or logging high-level stream metrics
             # (e.g., total audio duration, number of processed windows, quality indicators).
@@ -136,6 +145,7 @@ class AudioPipelineServicer(audio_pipeline_pb2_grpc.AudioPipelineServiceServicer
                     )
                 except Exception:
                     pass  # Ignore errors during cleanup
+                PIPELINE_QUEUE_SIZE.set(0)
 
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"Error processing audio stream: {str(e)}")
