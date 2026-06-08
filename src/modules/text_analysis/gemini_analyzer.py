@@ -11,6 +11,7 @@ from .gemini_transport import (
     generate_with_transport_chain,
     is_auth_error_message,
     key_prefix,
+    uses_ai_studio_api_key,
 )
 from ...pipeline_latency import (
     LatencyTraceContext,
@@ -38,13 +39,9 @@ class QuotaExhaustedError(Exception):
     pass
 
 
-def uses_vertex_express_api(api_key: str) -> bool:
-    """Return True for Vertex AI Express keys (``AQ.…`` prefix from AI Studio)."""
-    return (api_key or '').strip().startswith('AQ.')
-
-
-# Backwards-compatible alias used by tests and callers.
-uses_rest_developer_api = uses_vertex_express_api
+# Backwards-compatible aliases (AQ. keys are NOT Vertex — they use generativelanguage.googleapis.com).
+uses_vertex_express_api = uses_ai_studio_api_key
+uses_rest_developer_api = uses_ai_studio_api_key
 
 
 class GeminiAnalyzer:

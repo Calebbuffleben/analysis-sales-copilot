@@ -29,23 +29,28 @@ def key_prefix(api_key: str) -> str:
     return normalized[:8] + '...'
 
 
+_AI_STUDIO_TRANSPORTS = (
+    GeminiTransportMode.REST_DEVELOPER_HEADER,
+    GeminiTransportMode.REST_DEVELOPER_QUERY,
+    GeminiTransportMode.SDK_DEVELOPER,
+)
+
+
+def uses_ai_studio_api_key(api_key: str) -> bool:
+    """True for Google AI Studio keys (``AQ.…``) — Generative Language API only."""
+    return (api_key or '').strip().startswith('AQ.')
+
+
+def is_mode_valid_for_key(mode: GeminiTransportMode, api_key: str) -> bool:
+    """AQ. keys must not hit Vertex; standard API keys use Developer API only."""
+    if uses_ai_studio_api_key(api_key):
+        return mode in _AI_STUDIO_TRANSPORTS
+    return mode in _AI_STUDIO_TRANSPORTS
+
+
 def transport_candidates(api_key: str) -> tuple[GeminiTransportMode, ...]:
-    """Ordered transports to try. AQ keys get every path; AIza keys skip Vertex SDK."""
-    normalized = (api_key or '').strip()
-    if normalized.startswith('AQ.'):
-        return (
-            GeminiTransportMode.REST_DEVELOPER_HEADER,
-            GeminiTransportMode.REST_DEVELOPER_QUERY,
-            GeminiTransportMode.SDK_DEVELOPER,
-            GeminiTransportMode.REST_VERTEX_HEADER,
-            GeminiTransportMode.REST_VERTEX_QUERY,
-            GeminiTransportMode.SDK_VERTEX_EXPRESS,
-        )
-    return (
-        GeminiTransportMode.SDK_DEVELOPER,
-        GeminiTransportMode.REST_DEVELOPER_HEADER,
-        GeminiTransportMode.REST_DEVELOPER_QUERY,
-    )
+    """Ordered transports to try (Generative Language API / AI Studio paths only)."""
+    return _AI_STUDIO_TRANSPORTS
 
 
 def is_auth_error_message(message: str) -> bool:
@@ -187,7 +192,7 @@ def generate_with_transport_chain(
 ) -> tuple[str, GeminiTransportMode]:
     """Try transports in order until one succeeds. Returns text + winning mode."""
     candidates: list[GeminiTransportMode] = []
-    if preferred_mode is not None:
+    if preferred_mode is not None and is_mode_valid_for_key(preferred_mode, api_key):
         candidates.append(preferred_mode)
     for mode in transport_candidates(api_key):
         if mode not in candidates:
