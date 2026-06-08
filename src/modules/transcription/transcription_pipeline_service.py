@@ -7,6 +7,7 @@ import time
 from typing import Any, Optional
 
 from ...feedback_trace import log_feedback_trace, make_feedback_trace_id
+from ...pipeline_latency import LatencyTraceContext, log_speech_to_publish_ms
 from ..audio_buffer.audio_diagnostics import compute_pcm_window_stats
 from ..backend_feedback.publish_dispatcher import PublishDispatcher
 from ..backend_feedback.types import BackendFeedbackEvent
@@ -21,7 +22,9 @@ from ...metrics.realtime_metrics import (
     WINDOW_PROCESSED_TOTAL,
     WINDOW_SKIPPED_EMPTY_TOTAL,
 )
+from .partial_turn_coordinator import FinalAction, PartialTurnCoordinator
 from .transcription_service import TranscriptionService
+from .utterance_completeness import text_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +42,19 @@ class TranscriptionPipelineService:
         text_analysis_service: TextAnalysisService,
         publish_dispatcher: PublishDispatcher,
         default_language: Optional[str] = None,
+        *,
+        partial_coordinator: Optional[PartialTurnCoordinator] = None,
+        partial_min_confidence: float = 0.7,
+        feedback_allow_host_publish: bool = False,
     ) -> None:
         self._transcription_service = transcription_service
         self._text_analysis_service = text_analysis_service
         self._publish_dispatcher = publish_dispatcher
         self._default_language = self._normalize_language(default_language)
         self._stream_language_hints: dict[str, str] = {}
+        self._partial_coordinator = partial_coordinator
+        self._partial_min_confidence = partial_min_confidence
+        self._feedback_allow_host_publish = feedback_allow_host_publish
 
 
     def _on_window_ready(
@@ -213,8 +223,11 @@ class TranscriptionPipelineService:
         stream_key: str,
         chunk: TranscriptionChunk,
         audio_stats: Optional[dict[str, object]] = None,
+        *,
+        transcript_source: str = 'final',
+        extra_meta: Optional[dict[str, object]] = None,
     ) -> None:
-        """Process a finalized streaming transcript from a cloud STT provider."""
+        """Process a streaming transcript from a cloud STT provider."""
         if not chunk.text.strip():
             WINDOW_SKIPPED_EMPTY_TOTAL.inc()
             logger.debug(
@@ -222,6 +235,31 @@ class TranscriptionPipelineService:
                 stream_key,
             )
             return
+
+        source = (transcript_source or 'final').strip().lower()
+        meta = dict(extra_meta or {})
+        coordinator = self._partial_coordinator
+
+        if source == 'final' and coordinator is not None:
+            action = coordinator.plan_final_action(stream_key, chunk.text)
+            if action == FinalAction.SKIP:
+                logger.info(
+                    'Skipping final analyze/publish; partial already published | '
+                    'stream_key=%s | meeting=%s',
+                    stream_key,
+                    chunk.meeting_id,
+                )
+                coordinator.reset_turn(stream_key)
+                return
+            if action == FinalAction.RECONCILE:
+                partial_conf = coordinator.partial_published_confidence(stream_key)
+                logger.info(
+                    'Final reconcile: partial text diverged; re-analyzing | '
+                    'stream_key=%s | meeting=%s | partialConfidence=%.2f',
+                    stream_key,
+                    chunk.meeting_id,
+                    partial_conf,
+                )
 
         t_pipeline_start = time.perf_counter()
         t_wall_pipeline_start_ms = int(time.time() * 1000)
@@ -233,14 +271,19 @@ class TranscriptionPipelineService:
             float(window_end_to_pipeline_start_ms),
         )
 
-        logger.info(
-            "[Step 2] Streaming transcript finalized: '%s'",
-            chunk.text,
-        )
+        if source == 'partial':
+            logger.info("[Step 2] Partial transcript stable: '%s'", chunk.text)
+        else:
+            logger.info(
+                "[Step 2] Streaming transcript finalized: '%s'",
+                chunk.text,
+            )
         logger.info("[Step 3] Enviando transcrição para análise do Gemini")
         t_ana_start = time.perf_counter()
         is_host = _is_host_role(chunk.participant_role)
-        if is_host:
+        publish_host = is_host and self._feedback_allow_host_publish
+
+        if is_host and not publish_host:
             analysis = self._text_analysis_service.observe_context(chunk)
         else:
             analysis = self._text_analysis_service.analyze(chunk)
@@ -249,23 +292,67 @@ class TranscriptionPipelineService:
         ANALYSIS_MS.observe((t_ana_end - t_ana_start) * 1000.0)
 
         t_pub_start = time.perf_counter()
-        published_enqueued = (
-            False if is_host else self._handle_transcript(stream_key, chunk, analysis)
-        )
+        published_enqueued = False
+        if source == 'partial':
+            if (
+                analysis.direct_feedback
+                and analysis.confidence >= self._partial_min_confidence
+            ):
+                published_enqueued = self._handle_transcript(
+                    stream_key,
+                    chunk,
+                    analysis,
+                )
+                if published_enqueued and coordinator is not None:
+                    coordinator.note_partial_published(
+                        stream_key,
+                        chunk.text,
+                        analysis.confidence,
+                    )
+            else:
+                logger.info(
+                    'Partial analysis produced no publishable feedback | '
+                    'stream_key=%s | hasFeedback=%s | confidence=%.2f',
+                    stream_key,
+                    bool(analysis.direct_feedback),
+                    analysis.confidence,
+                )
+        elif publish_host or not is_host:
+            published_enqueued = self._handle_transcript(
+                stream_key,
+                chunk,
+                analysis,
+            )
         t_pub_end = time.perf_counter()
-
-        if published_enqueued:
-            WINDOW_PROCESSED_TOTAL.inc()
-
-        PIPELINE_TOTAL_MS.observe((t_pub_end - t_pipeline_start) * 1000.0)
-        analysis_ms = (t_ana_end - t_ana_start) * 1000.0
-        enqueue_ms = (t_pub_end - t_pub_start) * 1000.0
-        total_ms = (t_pub_end - t_pipeline_start) * 1000.0
         tid = make_feedback_trace_id(
             chunk.meeting_id,
             chunk.participant_id,
             chunk.window_end_ms,
         )
+
+        if published_enqueued:
+            WINDOW_PROCESSED_TOTAL.inc()
+            if source == 'partial':
+                speech_to_publish = log_speech_to_publish_ms(
+                    logger,
+                    LatencyTraceContext(
+                        trace_id=tid,
+                        meeting_id=chunk.meeting_id,
+                        participant_id=chunk.participant_id,
+                        window_end_ms=chunk.window_end_ms,
+                    ),
+                    partial_stable_wall_ms=int(chunk.window_end_ms),
+                    transcript_source='partial',
+                )
+                meta['speechToPublishMs'] = speech_to_publish
+
+        if source == 'final' and coordinator is not None:
+            coordinator.reset_turn(stream_key)
+
+        PIPELINE_TOTAL_MS.observe((t_pub_end - t_pipeline_start) * 1000.0)
+        analysis_ms = (t_ana_end - t_ana_start) * 1000.0
+        enqueue_ms = (t_pub_end - t_pub_start) * 1000.0
+        total_ms = (t_pub_end - t_pipeline_start) * 1000.0
         log_feedback_trace(
             logger,
             logging.INFO,
@@ -277,6 +364,8 @@ class TranscriptionPipelineService:
             extra={
                 'streamKey': stream_key,
                 'provider': 'assemblyai',
+                'transcriptSource': source,
+                'textFingerprint': text_fingerprint(chunk.text),
                 'windowEndToPipelineStartMs': window_end_to_pipeline_start_ms,
                 'publishEnqueued': published_enqueued,
                 'sttMs': 0.0,
@@ -284,8 +373,17 @@ class TranscriptionPipelineService:
                 'enqueueMs': round(enqueue_ms, 1),
                 'totalMs': round(total_ms, 1),
                 'hasDirectFeedback': bool(analysis.direct_feedback),
-                'contextOnly': is_host,
+                'contextOnly': is_host and not publish_host,
                 'transcriptChars': len(chunk.text or ''),
+                **{
+                    key: meta[key]
+                    for key in (
+                        'completenessReason',
+                        'turnOpenMs',
+                        'speechToPublishMs',
+                    )
+                    if key in meta
+                },
             },
         )
 

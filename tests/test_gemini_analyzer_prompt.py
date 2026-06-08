@@ -5,16 +5,16 @@ from src.modules.text_analysis.llm_state_validator import ConversationState
 
 
 def test_build_prompt_no_fstring_value_error():
-    """Inline JSON examples must not use single `{` inside the f-string body."""
+    """Literal JSON braces in the prompt must not break f-string compilation."""
     analyzer = GeminiAnalyzer.__new__(GeminiAnalyzer)
     prompt = analyzer._build_prompt(
         "O concorrente X está mais barato.",
         ConversationState.default_state().to_dict(),
     )
-    assert "playbook_variables" in prompt
-    assert '{"competidor": "Concorrente X", "produto": "Suite Pro"}' in prompt
-    assert "pain_points" in prompt
-    assert "claims" in prompt
+    assert "playbook_template_key" in prompt
+    assert '"estado": {}' in prompt
+    assert '"feedback": null' in prompt
+    assert "O concorrente X está mais barato." in prompt
 
 
 def test_build_prompt_marks_host_context_only():
@@ -25,5 +25,5 @@ def test_build_prompt_marks_host_context_only():
         speaker_role="host",
     )
 
-    assert "PAPEL DO TRECHO ATUAL: vendedor/host" in prompt
-    assert "`feedback`: null" in prompt
+    assert "PAPEL DO TRECHO: vendedor/host" in prompt
+    assert "NÃO gere feedback" in prompt

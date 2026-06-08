@@ -12,11 +12,19 @@ from src.modules.text_analysis.gemini_transport import (
 )
 
 
-def test_aq_keys_try_all_transports() -> None:
+def test_aq_keys_use_generative_language_api_only() -> None:
     modes = transport_candidates('AQ.test-key')
-    assert GeminiTransportMode.REST_DEVELOPER_HEADER in modes
-    assert GeminiTransportMode.SDK_VERTEX_EXPRESS in modes
-    assert modes[0] == GeminiTransportMode.REST_DEVELOPER_HEADER
+    assert modes == (
+        GeminiTransportMode.REST_DEVELOPER_HEADER,
+        GeminiTransportMode.REST_DEVELOPER_QUERY,
+        GeminiTransportMode.SDK_DEVELOPER,
+    )
+    assert GeminiTransportMode.REST_VERTEX_HEADER not in modes
+    assert GeminiTransportMode.SDK_VERTEX_EXPRESS not in modes
+
+
+def test_aiza_keys_same_developer_transports() -> None:
+    assert transport_candidates('AIzaSyExample') == transport_candidates('AQ.test-key')
 
 
 def test_is_auth_error_message() -> None:

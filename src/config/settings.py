@@ -52,6 +52,16 @@ class Settings:
     assemblyai_max_turn_silence_ms: Optional[int] = None
     assemblyai_vad_threshold: Optional[float] = None
     assemblyai_keyterms_prompt: Optional[str] = None
+    assemblyai_tab_audio_vad_threshold: Optional[float] = None
+    assemblyai_tab_audio_max_turn_silence_ms: Optional[int] = None
+    partial_analysis_enabled: bool = True
+    partial_stable_ms: int = 600
+    partial_word_stable_ms: int = 300
+    partial_growth_window_ms: int = 400
+    partial_min_words: int = 5
+    partial_cooldown_ms: int = 3000
+    partial_min_confidence: float = 0.7
+    feedback_allow_host_publish: bool = False
     # STT process parallelism (Phase 5): 0 = in-process + lock; N>=1 = N worker processes,
     # each with its own WhisperModel (true parallel transcribe).
     stt_process_workers: int = 0
@@ -215,6 +225,30 @@ class Settings:
             assemblyai_keyterms_prompt=(
                 (os.getenv('ASSEMBLYAI_KEYTERMS_PROMPT') or '').strip() or None
             ),
+            assemblyai_tab_audio_vad_threshold=cls._optional_float(
+                os.getenv('ASSEMBLYAI_TAB_AUDIO_VAD_THRESHOLD'),
+            ),
+            assemblyai_tab_audio_max_turn_silence_ms=cls._optional_int(
+                os.getenv('ASSEMBLYAI_TAB_AUDIO_MAX_TURN_SILENCE_MS'),
+            ),
+            partial_analysis_enabled=os.getenv(
+                'PARTIAL_ANALYSIS_ENABLED',
+                'true',
+            ).lower()
+            == 'true',
+            partial_stable_ms=int(os.getenv('PARTIAL_STABLE_MS', '600')),
+            partial_word_stable_ms=int(os.getenv('PARTIAL_WORD_STABLE_MS', '300')),
+            partial_growth_window_ms=int(
+                os.getenv('PARTIAL_GROWTH_WINDOW_MS', '400'),
+            ),
+            partial_min_words=int(os.getenv('PARTIAL_MIN_WORDS', '5')),
+            partial_cooldown_ms=int(os.getenv('PARTIAL_COOLDOWN_MS', '3000')),
+            partial_min_confidence=float(os.getenv('PARTIAL_MIN_CONFIDENCE', '0.7')),
+            feedback_allow_host_publish=os.getenv(
+                'FEEDBACK_ALLOW_HOST_PUBLISH',
+                'false',
+            ).lower()
+            == 'true',
             stt_process_workers=int(os.getenv('STT_PROCESS_WORKERS', '0')),
             window_queue_max_size=int(os.getenv('WINDOW_QUEUE_MAX_SIZE', '8')),
             window_worker_threads=int(os.getenv('WINDOW_WORKER_THREADS', '2')),

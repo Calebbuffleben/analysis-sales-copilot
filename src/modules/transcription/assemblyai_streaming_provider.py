@@ -27,6 +27,16 @@ from ...metrics.realtime_metrics import (
     ASSEMBLYAI_TURN_LATENCY_MS,
     ASSEMBLYAI_TURNS_TOTAL,
 )
+from ...feedback_trace import make_feedback_trace_id
+from ...pipeline_latency import (
+    LatencyTraceContext,
+    log_assemblyai_partial_received,
+    log_assemblyai_transcript_received,
+    log_assemblyai_turn_open_ms,
+    note_assemblyai_audio_sent,
+    pop_stream_turn_state,
+)
+from .partial_turn_coordinator import PartialTurnCoordinator
 from ..audio_buffer.audio_diagnostics import compute_pcm_window_stats
 from ..audio_buffer.service import WAV_HEADER_BYTES
 from ..text_analysis.types import TranscriptionChunk
@@ -55,6 +65,8 @@ class AssemblyAiStreamConfig:
     max_turn_silence_ms: Optional[int] = None
     vad_threshold: Optional[float] = None
     keyterms_prompt: Optional[str] = None
+    tab_audio_vad_threshold: Optional[float] = None
+    tab_audio_max_turn_silence_ms: Optional[int] = None
 
 
 @dataclass
@@ -84,9 +96,12 @@ class AssemblyAiStreamingProvider:
         self,
         config: AssemblyAiStreamConfig,
         on_final_transcript: FinalTranscriptCallback,
+        *,
+        partial_coordinator: Optional[PartialTurnCoordinator] = None,
     ) -> None:
         self._config = config
         self._on_final_transcript = on_final_transcript
+        self._partial_coordinator = partial_coordinator
         self._sessions: dict[str, _AssemblyAiSession] = {}
         self._lock = threading.RLock()
         self._callback_executor = ThreadPoolExecutor(
@@ -133,20 +148,36 @@ class AssemblyAiStreamingProvider:
             return
 
         session = self._get_or_start_session(stream_key, meta)
+        is_turn_start = False
         with session.lock:
             now_ms = int(time.time() * 1000)
             timestamp_ms = int(meta.get('timestamp_ms', now_ms) or now_ms)
             if session.current_turn_start_ms is None:
+                is_turn_start = True
                 duration_ms = self._duration_ms(
                     pcm_data,
                     sample_rate=session.sample_rate,
                     channels=session.channels,
                 )
                 session.current_turn_start_ms = max(0, timestamp_ms - duration_ms)
+                if self._partial_coordinator is not None:
+                    self._partial_coordinator.on_turn_audio_start(
+                        stream_key,
+                        now_ms,
+                    )
             session.current_turn_pcm.extend(pcm_data)
             session.last_audio_timestamp_ms = timestamp_ms
             session.last_audio_wall_ms = now_ms
             session.bytes_sent += len(pcm_data)
+            turn_bytes = len(session.current_turn_pcm)
+
+        note_assemblyai_audio_sent(
+            logger,
+            stream_key,
+            chunk_bytes=len(pcm_data),
+            turn_bytes=turn_bytes,
+            is_turn_start=is_turn_start,
+        )
 
         try:
             session.ws_app.send(pcm_data, opcode=self._binary_opcode())
@@ -212,7 +243,7 @@ class AssemblyAiStreamingProvider:
         sample_rate = int(meta.get('sample_rate') or self._config.sample_rate)
         channels = max(int(meta.get('channels') or 1), 1)
         ws_app = websocket.WebSocketApp(
-            self._build_url(sample_rate),
+            self._build_url(sample_rate, meta),
             header={'Authorization': self._config.api_key},
             on_open=lambda _ws: self._on_open(stream_key),
             on_message=lambda _ws, message: self._on_message(stream_key, message),
@@ -249,7 +280,24 @@ class AssemblyAiStreamingProvider:
         )
         return session
 
-    def _build_url(self, sample_rate: int) -> str:
+    def _build_url(
+        self,
+        sample_rate: int,
+        meta: Optional[dict[str, object]] = None,
+    ) -> str:
+        meta = meta or {}
+        track = str(meta.get('track') or '').strip().lower()
+        role = str(meta.get('participant_role') or '').strip().lower()
+        is_tab_audio = track == 'tab-audio' or role in {'participant', 'client'}
+
+        vad_threshold = self._config.vad_threshold
+        max_turn_silence_ms = self._config.max_turn_silence_ms
+        if is_tab_audio:
+            if self._config.tab_audio_vad_threshold is not None:
+                vad_threshold = self._config.tab_audio_vad_threshold
+            if self._config.tab_audio_max_turn_silence_ms is not None:
+                max_turn_silence_ms = self._config.tab_audio_max_turn_silence_ms
+
         params: dict[str, object] = {
             'speech_model': self._config.speech_model,
             'sample_rate': sample_rate,
@@ -263,10 +311,10 @@ class AssemblyAiStreamingProvider:
             )
         if self._config.min_turn_silence_ms is not None:
             params['min_turn_silence'] = self._config.min_turn_silence_ms
-        if self._config.max_turn_silence_ms is not None:
-            params['max_turn_silence'] = self._config.max_turn_silence_ms
-        if self._config.vad_threshold is not None:
-            params['vad_threshold'] = self._config.vad_threshold
+        if max_turn_silence_ms is not None:
+            params['max_turn_silence'] = max_turn_silence_ms
+        if vad_threshold is not None:
+            params['vad_threshold'] = vad_threshold
         if self._config.keyterms_prompt:
             params['keyterms_prompt'] = self._config.keyterms_prompt
 
@@ -323,8 +371,53 @@ class AssemblyAiStreamingProvider:
 
         ASSEMBLYAI_TURNS_TOTAL.inc()
         if not bool(payload.get('end_of_turn')):
+            self._handle_partial_turn(stream_key, payload)
             return
         self._handle_final_turn(stream_key, payload)
+
+    def _handle_partial_turn(
+        self,
+        stream_key: str,
+        payload: dict[str, Any],
+    ) -> None:
+        if self._partial_coordinator is None:
+            return
+        transcript = str(payload.get('transcript') or '').strip()
+        if not transcript:
+            return
+        session = self._get_session(stream_key)
+        if session is None:
+            return
+
+        now_ms = int(time.time() * 1000)
+        meeting_id = str(session.meta.get('meeting_id') or '')
+        participant_id = str(session.meta.get('participant_id') or '')
+        log_assemblyai_partial_received(
+            logger,
+            stream_key=stream_key,
+            meeting_id=meeting_id,
+            participant_id=participant_id,
+            transcript_chars=len(transcript),
+            wall_ms=now_ms,
+        )
+
+        with session.lock:
+            turn_start_ms = int(
+                session.current_turn_start_ms
+                or session.last_audio_timestamp_ms
+                or now_ms,
+            )
+            partial_meta = dict(session.meta)
+            partial_meta['turn_start_ms'] = turn_start_ms
+            words = payload.get('words')
+            partial_meta['transcript_confidence'] = self._confidence_from_words(words)
+
+        self._partial_coordinator.handle_partial(
+            stream_key,
+            transcript,
+            now_ms,
+            partial_meta,
+        )
 
     def _handle_final_turn(self, stream_key: str, payload: dict[str, Any]) -> None:
         ASSEMBLYAI_FINAL_TURNS_TOTAL.inc()
@@ -353,9 +446,50 @@ class AssemblyAiStreamingProvider:
             session.current_turn_pcm.clear()
             session.current_turn_start_ms = None
 
+        now_wall_ms = int(time.time() * 1000)
+        since_last_audio_ms = max(0, now_wall_ms - wall_end_ms) if wall_end_ms else 0
         if wall_end_ms:
-            ASSEMBLYAI_TURN_LATENCY_MS.observe(
-                max(0.0, float(int(time.time() * 1000) - wall_end_ms)),
+            ASSEMBLYAI_TURN_LATENCY_MS.observe(float(since_last_audio_ms))
+
+        turn_state = pop_stream_turn_state(stream_key)
+        meeting_id = str(session.meta.get('meeting_id') or '')
+        participant_id = str(session.meta.get('participant_id') or '')
+        trace_ctx = LatencyTraceContext(
+            trace_id=make_feedback_trace_id(
+                meeting_id,
+                participant_id,
+                window_end_ms,
+            ),
+            meeting_id=meeting_id,
+            participant_id=participant_id,
+            window_end_ms=window_end_ms,
+        )
+        turn_audio_ms = self._duration_ms(
+            turn_pcm,
+            sample_rate=session.sample_rate,
+            channels=session.channels,
+        )
+        log_assemblyai_transcript_received(
+            logger,
+            trace_ctx,
+            stream_key=stream_key,
+            since_last_audio_ms=since_last_audio_ms,
+            turn_bytes=len(turn_pcm),
+            audio_chunks_sent=turn_state.chunk_sends if turn_state else 0,
+            transcript_chars=len(transcript),
+            turn_audio_ms=turn_audio_ms,
+            last_audio_sent_wall_ms=wall_end_ms or None,
+            transcript_source='final',
+        )
+        if turn_state is not None and turn_state.turn_start_wall_ms:
+            log_assemblyai_turn_open_ms(
+                logger,
+                meeting_id=meeting_id,
+                participant_id=participant_id,
+                stream_key=stream_key,
+                turn_open_ms=max(0, now_wall_ms - turn_state.turn_start_wall_ms),
+                turn_chunks=turn_state.chunk_sends,
+                turn_audio_ms=turn_audio_ms,
             )
 
         words = payload.get('words')

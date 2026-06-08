@@ -10,6 +10,10 @@ from src.modules.transcription.assemblyai_streaming_provider import (
     AssemblyAiStreamConfig,
     AssemblyAiStreamingProvider,
 )
+from src.modules.transcription.partial_turn_coordinator import (
+    PartialTurnConfig,
+    PartialTurnCoordinator,
+)
 
 
 class _FakeWebSocketApp:
@@ -160,6 +164,82 @@ def test_partial_turn_does_not_emit_transcript(monkeypatch: Any) -> None:
     )
 
     assert received == []
+    provider.close_all()
+
+
+def test_partial_turn_forwards_to_coordinator(monkeypatch: Any) -> None:
+    _install_fake_websocket(monkeypatch)
+    partials: list[str] = []
+    coordinator = PartialTurnCoordinator(
+        PartialTurnConfig(enabled=True),
+        lambda _sk, chunk, _extra: partials.append(chunk.text),
+    )
+    provider = AssemblyAiStreamingProvider(
+        AssemblyAiStreamConfig(
+            api_key='test-key',
+            connect_timeout_seconds=0.2,
+            termination_timeout_seconds=0.0,
+        ),
+        lambda *_args: None,
+        partial_coordinator=coordinator,
+    )
+
+    meta = {
+        'meeting_id': 'meet-1',
+        'participant_id': 'meet-remote',
+        'track': 'tab-audio',
+        'participant_role': 'participant',
+        'sample_rate': 16000,
+        'channels': 1,
+        'timestamp_ms': 10_000,
+        'tenant_id': 'tenant-1',
+    }
+    provider.send_audio('meet-1:meet-remote:tab-audio', b'\x01\x00' * 1600, meta)
+    provider._on_message(
+        'meet-1:meet-remote:tab-audio',
+        json.dumps(
+            {
+                'type': 'Turn',
+                'end_of_turn': False,
+                'transcript': 'Achei muito caro.',
+            },
+        ),
+    )
+
+    assert partials == []
+    provider.close_all()
+
+
+def test_tab_audio_url_uses_tuned_vad(monkeypatch: Any) -> None:
+    _install_fake_websocket(monkeypatch)
+    provider = AssemblyAiStreamingProvider(
+        AssemblyAiStreamConfig(
+            api_key='test-key',
+            connect_timeout_seconds=0.2,
+            termination_timeout_seconds=0.0,
+            vad_threshold=0.5,
+            max_turn_silence_ms=2400,
+            tab_audio_vad_threshold=0.65,
+            tab_audio_max_turn_silence_ms=800,
+        ),
+        lambda *_args: None,
+    )
+    url = provider._build_url(
+        16000,
+        {
+            'track': 'tab-audio',
+            'participant_role': 'participant',
+        },
+    )
+    assert 'vad_threshold=0.65' in url
+    assert 'max_turn_silence=800' in url
+
+    mic_url = provider._build_url(
+        16000,
+        {'track': 'microphone', 'participant_role': 'host'},
+    )
+    assert 'vad_threshold=0.5' in mic_url
+    assert 'max_turn_silence=2400' in mic_url
     provider.close_all()
 
 

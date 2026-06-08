@@ -24,6 +24,7 @@ from .rule_based_analyzer import analyze_text_fallback
 from .types import TextAnalysisResult, TranscriptionChunk
 from ...config.settings import get_settings
 from ...feedback_trace import log_feedback_trace, make_feedback_trace_id
+from ...pipeline_latency import LatencyTraceContext
 from ...metrics.realtime_metrics import (
     LLM_CALLS_TOTAL,
     LLM_CALL_ERRORS_TOTAL,
@@ -734,6 +735,7 @@ class TextAnalysisService:
                 chunk.text,
                 current_state,
                 speaker_role,
+                chunk=chunk,
             )
             llm_duration_ms = time.time() * 1000 - llm_start_ms
             LLM_CALL_DURATION_MS.observe(llm_duration_ms)
@@ -843,6 +845,7 @@ class TextAnalysisService:
                 text,
                 current_state,
                 'client',
+                chunk=chunk,
             )
             LLM_CALL_DURATION_MS.observe(time.time() * 1000 - llm_start_ms)
             if result.get('direct_feedback'):
@@ -853,17 +856,38 @@ class TextAnalysisService:
             logger.error("Deferred LLM analysis error: %s", e, exc_info=True)
             return None
 
+    @staticmethod
+    def _latency_context_for_chunk(chunk: TranscriptionChunk) -> LatencyTraceContext:
+        return LatencyTraceContext(
+            trace_id=make_feedback_trace_id(
+                chunk.meeting_id,
+                chunk.participant_id,
+                chunk.window_end_ms,
+            ),
+            meeting_id=chunk.meeting_id,
+            participant_id=chunk.participant_id,
+            window_end_ms=chunk.window_end_ms,
+        )
+
     def _analyze_with_role(
         self,
         analyzer: object,
         text: str,
         state: Dict[str, Any],
         speaker_role: str,
+        chunk: Optional[TranscriptionChunk] = None,
     ) -> Dict[str, Any]:
         """Call analyzers with speaker_role while keeping old test doubles valid."""
+        latency_context = (
+            self._latency_context_for_chunk(chunk) if chunk is not None else None
+        )
+        analyze_kwargs: dict[str, object] = {'speaker_role': speaker_role}
+        if latency_context is not None:
+            analyze_kwargs['latency_context'] = latency_context
         try:
-            return analyzer.analyze(text, state, speaker_role=speaker_role)
-        except TypeError as exc:
-            if 'speaker_role' not in str(exc):
-                raise
-            return analyzer.analyze(text, state)
+            return analyzer.analyze(text, state, **analyze_kwargs)
+        except TypeError:
+            try:
+                return analyzer.analyze(text, state, speaker_role=speaker_role)
+            except TypeError:
+                return analyzer.analyze(text, state)
