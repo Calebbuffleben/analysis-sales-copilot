@@ -27,6 +27,13 @@ from ...metrics.realtime_metrics import (
     ASSEMBLYAI_TURN_LATENCY_MS,
     ASSEMBLYAI_TURNS_TOTAL,
 )
+from ...feedback_trace import make_feedback_trace_id
+from ...pipeline_latency import (
+    LatencyTraceContext,
+    log_assemblyai_transcript_received,
+    note_assemblyai_audio_sent,
+    pop_stream_turn_state,
+)
 from ..audio_buffer.audio_diagnostics import compute_pcm_window_stats
 from ..audio_buffer.service import WAV_HEADER_BYTES
 from ..text_analysis.types import TranscriptionChunk
@@ -133,10 +140,12 @@ class AssemblyAiStreamingProvider:
             return
 
         session = self._get_or_start_session(stream_key, meta)
+        is_turn_start = False
         with session.lock:
             now_ms = int(time.time() * 1000)
             timestamp_ms = int(meta.get('timestamp_ms', now_ms) or now_ms)
             if session.current_turn_start_ms is None:
+                is_turn_start = True
                 duration_ms = self._duration_ms(
                     pcm_data,
                     sample_rate=session.sample_rate,
@@ -147,6 +156,15 @@ class AssemblyAiStreamingProvider:
             session.last_audio_timestamp_ms = timestamp_ms
             session.last_audio_wall_ms = now_ms
             session.bytes_sent += len(pcm_data)
+            turn_bytes = len(session.current_turn_pcm)
+
+        note_assemblyai_audio_sent(
+            logger,
+            stream_key,
+            chunk_bytes=len(pcm_data),
+            turn_bytes=turn_bytes,
+            is_turn_start=is_turn_start,
+        )
 
         try:
             session.ws_app.send(pcm_data, opcode=self._binary_opcode())
@@ -353,10 +371,39 @@ class AssemblyAiStreamingProvider:
             session.current_turn_pcm.clear()
             session.current_turn_start_ms = None
 
+        now_wall_ms = int(time.time() * 1000)
+        since_last_audio_ms = max(0, now_wall_ms - wall_end_ms) if wall_end_ms else 0
         if wall_end_ms:
-            ASSEMBLYAI_TURN_LATENCY_MS.observe(
-                max(0.0, float(int(time.time() * 1000) - wall_end_ms)),
-            )
+            ASSEMBLYAI_TURN_LATENCY_MS.observe(float(since_last_audio_ms))
+
+        turn_state = pop_stream_turn_state(stream_key)
+        meeting_id = str(session.meta.get('meeting_id') or '')
+        participant_id = str(session.meta.get('participant_id') or '')
+        trace_ctx = LatencyTraceContext(
+            trace_id=make_feedback_trace_id(
+                meeting_id,
+                participant_id,
+                window_end_ms,
+            ),
+            meeting_id=meeting_id,
+            participant_id=participant_id,
+            window_end_ms=window_end_ms,
+        )
+        log_assemblyai_transcript_received(
+            logger,
+            trace_ctx,
+            stream_key=stream_key,
+            since_last_audio_ms=since_last_audio_ms,
+            turn_bytes=len(turn_pcm),
+            audio_chunks_sent=turn_state.chunk_sends if turn_state else 0,
+            transcript_chars=len(transcript),
+            turn_audio_ms=self._duration_ms(
+                turn_pcm,
+                sample_rate=session.sample_rate,
+                channels=session.channels,
+            ),
+            last_audio_sent_wall_ms=wall_end_ms or None,
+        )
 
         words = payload.get('words')
         confidence = self._confidence_from_words(words)

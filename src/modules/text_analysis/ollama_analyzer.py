@@ -23,6 +23,11 @@ from typing import Any, Dict, Optional
 
 import requests
 
+from ...pipeline_latency import (
+    LatencyTraceContext,
+    log_gemini_prompt_sent,
+    log_gemini_response_received,
+)
 from .llm_state_validator import (
     validate_llm_response,
     ConversationState,
@@ -93,12 +98,22 @@ class OllamaAnalyzer:
         text: str,
         conversation_state: Dict[str, Any],
         speaker_role: str = 'client',
+        latency_context: Optional[LatencyTraceContext] = None,
     ) -> Dict[str, Any]:
         """
         Analyze transcribed text using Ollama local model.
         Returns same format as GeminiAnalyzer for drop-in replacement.
         """
         prompt = self._build_prompt(text, conversation_state, speaker_role=speaker_role)
+        prompt_sent_wall_ms: Optional[int] = None
+        if latency_context is not None:
+            prompt_sent_wall_ms = log_gemini_prompt_sent(
+                logger,
+                latency_context,
+                prompt_chars=len(prompt),
+                speaker_role=speaker_role,
+                provider='ollama',
+            )
 
         try:
             start_time = time.time()
@@ -143,6 +158,18 @@ class OllamaAnalyzer:
                 f"feedback='{validated.direct_feedback[:50] if validated.direct_feedback else 'none'}...', "
                 f"confidence={validated.confidence:.2f}"
             )
+
+            if latency_context is not None and prompt_sent_wall_ms is not None:
+                log_gemini_response_received(
+                    logger,
+                    latency_context,
+                    prompt_sent_wall_ms=prompt_sent_wall_ms,
+                    response_chars=len(response_text),
+                    llm_round_trip_ms=int(duration_ms),
+                    has_feedback=bool(validated.direct_feedback),
+                    confidence=validated.confidence,
+                    provider='ollama',
+                )
             
             return {
                 'direct_feedback': validated.direct_feedback,
