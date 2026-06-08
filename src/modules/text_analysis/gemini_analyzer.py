@@ -367,8 +367,7 @@ Cliente: "Preciso pensar e decidir depois."
 
 REGRAS DE SPIN (só com evidência clara)
 
-Fases: situacao → problema → implicacao → necessidade
-Mantenha a fase atual salvo nova evidência.
+Use fase_spin do estado atual e altere apenas com evidência clara.
 
 Somente quando fase_spin != "neutro":
 - pode sugerir proxima_pergunta_spin
