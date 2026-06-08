@@ -306,20 +306,20 @@ Com fase_spin="neutro", NÃO mencione metodologias de venda nem fases no texto d
 
 FORMATO (todos os campos da raiz são obrigatórios)
 
-{
+{{
   "feedback": string|null,
   "confidence": number,
   "feedback_type": string|null,
   "playbook_template_key": string|null,
   "playbook_variables": object|null,
   "estado": object
-}
+}}
 
 ESTADO — regras obrigatórias
 
 - O campo "estado" DEVE existir em toda resposta.
 - Quando nenhum campo do estado mudar neste trecho, retorne exatamente:
-  "estado": {}
+  "estado": {{}}
 - Quando houver mudanças, inclua em "estado" SOMENTE os campos que mudaram (o servidor fará merge com o estado atual).
 - Campos possíveis em "estado":
   interesse, resistencia, objecoes_detectadas, engajamento, fase_spin,
@@ -360,7 +360,7 @@ Cliente: "Me interessa. Qual o próximo passo?"
 => feedback_type="closing"
 
 Cliente: "Pode continuar explicando."
-=> "feedback": null, "estado": {}
+=> "feedback": null, "estado": {{}}
 
 Cliente: "Preciso pensar e decidir depois."
 => feedback_type="objection", objecoes_detectadas=["tempo"]
