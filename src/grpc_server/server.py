@@ -23,11 +23,17 @@ from ..modules.backend_feedback.grpc_feedback_client import BackendFeedbackClien
 from ..modules.backend_feedback.publish_dispatcher import PublishDispatcher
 from ..modules.backend_feedback.service_jwt_provider import ServiceJwtProvider
 from ..modules.text_analysis.text_analysis_service import TextAnalysisService
+from ..feedback_trace import make_feedback_trace_id
 from ..modules.transcription.assemblyai_streaming_provider import (
     AssemblyAiStreamConfig,
     AssemblyAiStreamingProvider,
 )
+from ..modules.transcription.partial_turn_coordinator import (
+    PartialTurnConfig,
+    PartialTurnCoordinator,
+)
 from ..modules.transcription.ready_window_dispatcher import ReadyWindowDispatcher
+from ..pipeline_latency import LatencyTraceContext, log_assemblyai_partial_stable
 from ..modules.transcription.transcription_pipeline_service import (
     TranscriptionPipelineService,
 )
@@ -263,7 +269,59 @@ def create_server(config: Settings) -> grpc.Server:
         text_analysis_service=text_analysis_service,
         publish_dispatcher=publish_dispatcher,
         default_language=config.whisper_default_language,
+        partial_min_confidence=config.partial_min_confidence,
+        feedback_allow_host_publish=config.feedback_allow_host_publish,
     )
+    partial_coordinator: PartialTurnCoordinator | None = None
+    if config.stt_provider == 'assemblyai' and config.partial_analysis_enabled:
+
+        def _on_partial_ready(
+            stream_key: str,
+            chunk: object,
+            extra: dict[str, object],
+        ) -> None:
+            from ..modules.text_analysis.types import TranscriptionChunk
+
+            assert isinstance(chunk, TranscriptionChunk)
+            trace_ctx = LatencyTraceContext(
+                trace_id=make_feedback_trace_id(
+                    chunk.meeting_id,
+                    chunk.participant_id,
+                    chunk.window_end_ms,
+                ),
+                meeting_id=chunk.meeting_id,
+                participant_id=chunk.participant_id,
+                window_end_ms=chunk.window_end_ms,
+            )
+            turn_open_ms = extra.get('turnOpenMs')
+            log_assemblyai_partial_stable(
+                logger,
+                trace_ctx,
+                stream_key=stream_key,
+                transcript_chars=len(chunk.text),
+                completeness_reason=str(extra.get('completenessReason') or ''),
+                turn_open_ms=turn_open_ms if isinstance(turn_open_ms, int) else None,
+            )
+            transcription_pipeline_service.process_transcript(
+                stream_key,
+                chunk,
+                transcript_source='partial',
+                extra_meta=extra,
+            )
+
+        partial_coordinator = PartialTurnCoordinator(
+            PartialTurnConfig(
+                enabled=True,
+                stable_ms=config.partial_stable_ms,
+                word_stable_ms=config.partial_word_stable_ms,
+                growth_window_ms=config.partial_growth_window_ms,
+                min_words=config.partial_min_words,
+                cooldown_ms=config.partial_cooldown_ms,
+            ),
+            _on_partial_ready,
+        )
+        transcription_pipeline_service._partial_coordinator = partial_coordinator
+
     streaming_stt_provider: AssemblyAiStreamingProvider | None = None
     if config.stt_provider == 'assemblyai':
         assert config.assemblyai_api_key
@@ -286,8 +344,13 @@ def create_server(config: Settings) -> grpc.Server:
                 max_turn_silence_ms=config.assemblyai_max_turn_silence_ms,
                 vad_threshold=config.assemblyai_vad_threshold,
                 keyterms_prompt=config.assemblyai_keyterms_prompt,
+                tab_audio_vad_threshold=config.assemblyai_tab_audio_vad_threshold,
+                tab_audio_max_turn_silence_ms=(
+                    config.assemblyai_tab_audio_max_turn_silence_ms
+                ),
             ),
             transcription_pipeline_service.process_transcript,
+            partial_coordinator=partial_coordinator,
         )
     else:
         ready_window_dispatcher = ReadyWindowDispatcher(
@@ -317,12 +380,27 @@ def create_server(config: Settings) -> grpc.Server:
     if config.stt_provider == 'assemblyai':
         logger.info(
             'STT config | provider=assemblyai | model=%s | api_host=%s | '
-            'sample_rate=%s | format_turns=%s | idle_timeout_ms=%s',
+            'sample_rate=%s | format_turns=%s | continuous_partials=%s | '
+            'idle_timeout_ms=%s | min_turn_silence_ms=%s | max_turn_silence_ms=%s | '
+            'vad_threshold=%s | tab_audio_vad_threshold=%s | '
+            'tab_audio_max_turn_silence_ms=%s | partial_analysis=%s | '
+            'partial_stable_ms=%s | partial_min_confidence=%s | '
+            'feedback_allow_host_publish=%s',
             config.assemblyai_speech_model,
             config.assemblyai_api_host,
             config.assemblyai_sample_rate,
             config.assemblyai_format_turns,
+            config.assemblyai_continuous_partials,
             config.assemblyai_stream_idle_timeout_ms,
+            config.assemblyai_min_turn_silence_ms,
+            config.assemblyai_max_turn_silence_ms,
+            config.assemblyai_vad_threshold,
+            config.assemblyai_tab_audio_vad_threshold,
+            config.assemblyai_tab_audio_max_turn_silence_ms,
+            config.partial_analysis_enabled,
+            config.partial_stable_ms,
+            config.partial_min_confidence,
+            config.feedback_allow_host_publish,
         )
     else:
         logger.info(

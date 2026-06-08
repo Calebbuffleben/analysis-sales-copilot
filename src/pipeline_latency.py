@@ -16,6 +16,8 @@ LATENCY_MARKER = '⏱️ LATENCY'
 
 STAGE_ORDER: dict[str, int] = {
     'assemblyai.audio_sent': 1,
+    'assemblyai.partial_received': 1,
+    'assemblyai.partial_stable': 2,
     'assemblyai.transcript_received': 2,
     'gemini.prompt_sent': 3,
     'gemini.response_received': 4,
@@ -23,6 +25,8 @@ STAGE_ORDER: dict[str, int] = {
 
 STAGE_LABEL: dict[str, str] = {
     'assemblyai.audio_sent': '① assemblyai.audio_sent',
+    'assemblyai.partial_received': '① assemblyai.partial_received',
+    'assemblyai.partial_stable': '② assemblyai.partial_stable',
     'assemblyai.transcript_received': '② assemblyai.transcript_received',
     'gemini.prompt_sent': '③ gemini.prompt_sent',
     'gemini.response_received': '④ gemini.response_received',
@@ -201,6 +205,79 @@ def pop_stream_turn_state(stream_key: str) -> Optional[_StreamTurnState]:
         return _stream_turns.pop(stream_key, None)
 
 
+def log_assemblyai_partial_received(
+    logger: logging.Logger,
+    *,
+    stream_key: str,
+    meeting_id: str,
+    participant_id: str,
+    transcript_chars: int,
+    wall_ms: Optional[int] = None,
+) -> None:
+    """Debug-only observability for incoming partial turns."""
+    logger.debug(
+        '%s │ partial_received │ stream=%s │ meeting=%s │ participant=%s │ '
+        'chars=%s │ wallMs=%s',
+        LATENCY_MARKER,
+        stream_key,
+        meeting_id,
+        participant_id,
+        transcript_chars,
+        wall_ms or _wall_ms(),
+    )
+
+
+def log_assemblyai_partial_stable(
+    logger: logging.Logger,
+    ctx: LatencyTraceContext,
+    *,
+    stream_key: str,
+    transcript_chars: int,
+    completeness_reason: str,
+    turn_open_ms: Optional[int] = None,
+) -> None:
+    """Milestone ② — stable partial passed completeness gate."""
+    _log_milestone(
+        logger,
+        'assemblyai.partial_stable',
+        trace_id=ctx.trace_id,
+        meeting_id=ctx.meeting_id,
+        participant_id=ctx.participant_id,
+        window_end_ms=ctx.window_end_ms,
+        extra={
+            'streamKey': stream_key,
+            'transcriptChars': transcript_chars,
+            'completenessReason': completeness_reason,
+            'turnOpenMs': turn_open_ms,
+            'transcriptSource': 'partial',
+        },
+    )
+
+
+def log_assemblyai_turn_open_ms(
+    logger: logging.Logger,
+    *,
+    meeting_id: str,
+    participant_id: str,
+    stream_key: str,
+    turn_open_ms: int,
+    turn_chunks: int,
+    turn_audio_ms: Optional[int] = None,
+) -> None:
+    """Wall-clock duration the AssemblyAI turn stayed open before end_of_turn."""
+    logger.info(
+        '%s │ turn_open │ stream=%s │ meeting=%s │ participant=%s │ '
+        'turnOpenMs=%s │ turnChunks=%s │ turnAudioMs=%s',
+        LATENCY_MARKER,
+        stream_key,
+        meeting_id,
+        participant_id,
+        turn_open_ms,
+        turn_chunks,
+        turn_audio_ms,
+    )
+
+
 def log_assemblyai_transcript_received(
     logger: logging.Logger,
     ctx: LatencyTraceContext,
@@ -212,6 +289,7 @@ def log_assemblyai_transcript_received(
     transcript_chars: int,
     turn_audio_ms: Optional[int] = None,
     last_audio_sent_wall_ms: Optional[int] = None,
+    transcript_source: str = 'final',
 ) -> None:
     """Milestone ② — finalized turn from AssemblyAI."""
     if last_audio_sent_wall_ms is not None:
@@ -230,6 +308,7 @@ def log_assemblyai_transcript_received(
             'audioChunksSent': audio_chunks_sent,
             'transcriptChars': transcript_chars,
             'turnAudioMs': turn_audio_ms,
+            'transcriptSource': transcript_source,
         },
     )
 
@@ -304,15 +383,24 @@ def log_gemini_response_received(
 
     stt_ms = _seg('assemblyai.audio_sent', 'assemblyai.transcript_received')
     pre_llm_ms = _seg('assemblyai.transcript_received', 'gemini.prompt_sent')
+    if pre_llm_ms is None:
+        pre_llm_ms = _seg('assemblyai.partial_stable', 'gemini.prompt_sent')
     llm_ms = _seg('gemini.prompt_sent', 'gemini.response_received')
     total_ms = max(0, _wall_ms() - timeline.origin_wall_ms)
+    transcript_source = (
+        'partial'
+        if 'assemblyai.partial_stable' in timeline.stages
+        and 'assemblyai.transcript_received' not in timeline.stages
+        else 'final'
+    )
 
     logger.info(
-        '%s │ RESUMO │ traceId=%s │ meeting=%s │ '
+        '%s │ RESUMO │ traceId=%s │ meeting=%s │ transcriptSource=%s │ '
         'STT(①→②)=%sms │ fila+prep(②→③)=%sms │ LLM(③→④)=%sms │ total≈%sms',
         LATENCY_MARKER,
         ctx.trace_id,
         ctx.meeting_id,
+        transcript_source,
         stt_ms if stt_ms is not None else '?',
         pre_llm_ms if pre_llm_ms is not None else '?',
         llm_ms if llm_ms is not None else llm_round_trip_ms,
@@ -321,6 +409,30 @@ def log_gemini_response_received(
 
     with _lock:
         _trace_timelines.pop(ctx.trace_id, None)
+
+
+def log_speech_to_publish_ms(
+    logger: logging.Logger,
+    ctx: LatencyTraceContext,
+    *,
+    partial_stable_wall_ms: int,
+    transcript_source: str = 'partial',
+) -> int:
+    """Wall time from stable partial to publish enqueue."""
+    publish_wall_ms = _wall_ms()
+    speech_to_publish_ms = max(0, publish_wall_ms - partial_stable_wall_ms)
+    logger.info(
+        '%s │ speech_to_publish │ traceId=%s │ meeting=%s │ participant=%s │ '
+        'speechToPublishMs=%s │ transcriptSource=%s │ partialStableWallMs=%s',
+        LATENCY_MARKER,
+        ctx.trace_id,
+        ctx.meeting_id,
+        ctx.participant_id,
+        speech_to_publish_ms,
+        transcript_source,
+        partial_stable_wall_ms,
+    )
+    return speech_to_publish_ms
 
 
 def clear_trace(trace_id: str) -> None:
