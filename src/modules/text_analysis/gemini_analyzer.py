@@ -11,6 +11,7 @@ from .gemini_transport import (
     generate_with_transport_chain,
     is_auth_error_message,
     key_prefix,
+    sdk_generation_config,
     uses_ai_studio_api_key,
 )
 from ...pipeline_latency import (
@@ -67,22 +68,10 @@ class GeminiAnalyzer:
         self._cached_transport: Optional[GeminiTransportMode] = None
         self.client = client
 
-        if client is not None:
-            try:
-                from google.genai import types
-
-                self._generation_config_factory = types.GenerateContentConfig
-            except Exception as exc:
-                raise RuntimeError(
-                    'google-genai is required for Gemini analysis. '
-                    'Install python-service requirements before starting.',
-                ) from exc
-        else:
-            if not self._api_key:
-                logger.warning(
-                    'No Gemini API key provided. Analysis might fail if not injected properly.',
-                )
-            self._generation_config_factory = None
+        if client is None and not self._api_key:
+            logger.warning(
+                'No Gemini API key provided. Analysis might fail if not injected properly.',
+            )
 
         # Quota protection: track consecutive 429 errors
         self._consecutive_429_errors = 0
@@ -133,10 +122,7 @@ class GeminiAnalyzer:
                 response = self.client.models.generate_content(
                     model=self.model_name,
                     contents=prompt,
-                    config=self._generation_config(
-                        response_mime_type="application/json",
-                        temperature=0.2,
-                    ),
+                    config=sdk_generation_config(json_mode=True),
                 )
                 response_text = response.text or ''
             else:
@@ -245,11 +231,6 @@ class GeminiAnalyzer:
             # Non-429 error: log and return default
             logger.exception(f"Error during Gemini analysis (non-quota): {e}")
             return self._default_response(conversation_state)
-
-    def _generation_config(self, **kwargs: Any) -> Any:
-        if self._generation_config_factory is None:
-            return kwargs
-        return self._generation_config_factory(**kwargs)
 
     def _default_response(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """Return a safe fallback if Gemini fails."""

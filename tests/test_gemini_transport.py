@@ -1,13 +1,16 @@
 """Tests for Gemini multi-transport auth chain."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.modules.text_analysis.gemini_transport import (
+    GEMINI_MAX_OUTPUT_TOKENS,
+    GEMINI_THINKING_BUDGET,
     GeminiTransportMode,
     generate_with_transport_chain,
     is_auth_error_message,
+    rest_generation_config,
     transport_candidates,
 )
 
@@ -30,6 +33,32 @@ def test_aiza_keys_same_developer_transports() -> None:
 def test_is_auth_error_message() -> None:
     assert is_auth_error_message('401 UNAUTHENTICATED ACCESS_TOKEN_TYPE_UNSUPPORTED')
     assert not is_auth_error_message('timeout')
+
+
+def test_rest_generation_config_disables_thinking() -> None:
+    config = rest_generation_config(json_mode=True)
+    assert config['maxOutputTokens'] == GEMINI_MAX_OUTPUT_TOKENS
+    assert config['thinkingConfig'] == {'thinkingBudget': GEMINI_THINKING_BUDGET}
+    assert config['responseMimeType'] == 'application/json'
+
+
+def test_sdk_generation_config_disables_thinking() -> None:
+    fake_types = MagicMock()
+    fake_thinking = MagicMock()
+    fake_config = MagicMock()
+    fake_types.ThinkingConfig = fake_thinking
+    fake_types.GenerateContentConfig = fake_config
+
+    with patch.dict('sys.modules', {'google.genai': MagicMock(types=fake_types)}):
+        from src.modules.text_analysis.gemini_transport import sdk_generation_config
+
+        sdk_generation_config(json_mode=True)
+
+    fake_thinking.assert_called_once_with(thinking_budget=GEMINI_THINKING_BUDGET)
+    fake_config.assert_called_once()
+    _, kwargs = fake_config.call_args
+    assert kwargs['max_output_tokens'] == GEMINI_MAX_OUTPUT_TOKENS
+    assert kwargs['response_mime_type'] == 'application/json'
 
 
 def test_generate_with_transport_chain_falls_back_on_auth_error() -> None:

@@ -1,8 +1,6 @@
 """Tests for Gemini analyzer transport integration."""
 
-import sys
 from unittest.mock import MagicMock, patch
-
 from src.modules.text_analysis.gemini_analyzer import (
     GeminiAnalyzer,
     uses_vertex_express_api,
@@ -42,17 +40,18 @@ def test_analyzer_sdk_injection_path() -> None:
         text='{"feedback": null, "confidence": 0.0, "feedback_type": null, "estado": {}}',
     )
     fake_types = MagicMock()
-    with patch.dict(
-        'sys.modules',
-        {'google.genai': MagicMock(types=fake_types)},
-    ):
-        import sys
-
-        sys.modules['google'] = MagicMock(genai=sys.modules['google.genai'])
+    with patch(
+        'src.modules.text_analysis.gemini_analyzer.sdk_generation_config',
+        return_value=fake_types,
+    ) as config_builder:
         analyzer = GeminiAnalyzer(
             api_key='AIzaSyExample',
             client=fake_client,
         )
-    result = analyzer.analyze('teste', {}, speaker_role='host')
+        result = analyzer.analyze('teste', {}, speaker_role='host')
+
     assert result['direct_feedback'] == ''
+    config_builder.assert_called_once_with(json_mode=True)
     fake_client.models.generate_content.assert_called_once()
+    _, kwargs = fake_client.models.generate_content.call_args
+    assert kwargs['config'] is fake_types
