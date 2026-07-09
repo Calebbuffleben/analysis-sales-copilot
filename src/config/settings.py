@@ -78,6 +78,19 @@ class Settings:
     publish_max_age_ms: int = 60_000
     publish_retry_limit: int = 1
     publish_retry_backoff_ms: int = 200
+    # Direct desktop WebSocket gateway (backend bypass on the critical path).
+    # Binds to PORT (Railway public port, typically 8000) — same port the
+    # platform routes wss://*.up.railway.app to. gRPC stays on GRPC_PORT.
+    desktop_ws_enabled: bool = False
+    port: int = 8765
+    desktop_ws_coalesce_ms: int = 100
+    desktop_ws_require_auth: bool = True
+    # Same key material the backend uses (JWT_PUBLIC_KEY RS256 prod,
+    # JWT_SECRET HS256 dev) so the gateway validates identical access tokens.
+    jwt_public_key: Optional[str] = None
+    jwt_secret: Optional[str] = None
+    jwt_issuer: str = 'meet-backend'
+    jwt_audience: str = 'meet-platform'
     metrics_enabled: bool = True
     metrics_port: int = 9100
     log_level: str = 'INFO'
@@ -267,6 +280,21 @@ class Settings:
             publish_retry_backoff_ms=int(
                 os.getenv('PUBLISH_RETRY_BACKOFF_MS', '200'),
             ),
+            desktop_ws_enabled=os.getenv('DESKTOP_WS_ENABLED', 'false').lower()
+            == 'true',
+            port=int(os.getenv('PORT', '8765')),
+            desktop_ws_coalesce_ms=int(os.getenv('DESKTOP_WS_COALESCE_MS', '100')),
+            desktop_ws_require_auth=os.getenv(
+                'DESKTOP_WS_REQUIRE_AUTH',
+                'true',
+            ).lower()
+            == 'true',
+            jwt_public_key=(os.getenv('JWT_PUBLIC_KEY') or '').strip() or None,
+            jwt_secret=(os.getenv('JWT_SECRET') or '').strip() or None,
+            jwt_issuer=os.getenv('JWT_ISSUER', 'meet-backend').strip()
+            or 'meet-backend',
+            jwt_audience=os.getenv('JWT_AUDIENCE', 'meet-platform').strip()
+            or 'meet-platform',
             metrics_enabled=os.getenv('METRICS_ENABLED', 'true').lower() == 'true',
             metrics_port=int(os.getenv('METRICS_PORT', '9100')),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
@@ -503,6 +531,22 @@ class Settings:
             )
         if self.metrics_port < 1 or self.metrics_port > 65535:
             raise ValueError(f'Invalid METRICS_PORT: {self.metrics_port}')
+        if self.desktop_ws_enabled:
+            if self.port < 1 or self.port > 65535:
+                raise ValueError(f'Invalid PORT: {self.port}')
+            if self.desktop_ws_coalesce_ms < 20:
+                raise ValueError(
+                    f'Invalid DESKTOP_WS_COALESCE_MS: {self.desktop_ws_coalesce_ms} '
+                    '(min 20ms)',
+                )
+            if self.desktop_ws_require_auth and not (
+                self.jwt_public_key or self.jwt_secret
+            ):
+                raise ValueError(
+                    'DESKTOP_WS_ENABLED=true requires JWT_PUBLIC_KEY (RS256) or '
+                    'JWT_SECRET (HS256, dev only) to validate desktop tokens. '
+                    'Set DESKTOP_WS_REQUIRE_AUTH=false only on trusted networks.',
+                )
         if self.llm_provider == 'gemini':
             keys = self.effective_gemini_api_keys()
             if not keys:
