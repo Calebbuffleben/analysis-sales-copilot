@@ -43,19 +43,16 @@ class DesktopWsAuthenticator:
         self._issuer = issuer
         self._audience = audience
         self._require_auth = require_auth
-        self._algorithm: Optional[str] = None
-        self._verify_key: Optional[str] = None
+        self._verify_keys: dict[str, str] = {}
 
         public_key = self._normalize_pem(jwt_public_key)
         secret = (jwt_secret or '').strip() or None
         if public_key:
-            self._algorithm = 'RS256'
-            self._verify_key = public_key
-        elif secret:
-            self._algorithm = 'HS256'
-            self._verify_key = secret
+            self._verify_keys['RS256'] = public_key
+        if secret:
+            self._verify_keys['HS256'] = secret
 
-        if require_auth and self._verify_key is None:
+        if require_auth and not self._verify_keys:
             raise ValueError(
                 'Desktop WS auth requires JWT_PUBLIC_KEY (RS256) or '
                 'JWT_SECRET (HS256, dev only). Set DESKTOP_WS_REQUIRE_AUTH=false '
@@ -76,7 +73,7 @@ class DesktopWsAuthenticator:
         expected_tenant_id: Optional[str],
     ) -> WsAuthContext:
         """Validate the token and cross-check the tenant hint from the URL."""
-        if not self._require_auth and self._verify_key is None:
+        if not self._require_auth and not self._verify_keys:
             return WsAuthContext(
                 user_id='anonymous',
                 tenant_id=expected_tenant_id or '',
@@ -91,15 +88,25 @@ class DesktopWsAuthenticator:
         except ImportError as exc:  # pragma: no cover
             raise WsAuthError('PyJWT is not installed') from exc
 
-        assert self._verify_key is not None and self._algorithm is not None
         try:
+            header = pyjwt.get_unverified_header(token)
+            algorithm = str(header.get('alg') or '')
+            verify_key = self._verify_keys.get(algorithm)
+            if verify_key is None:
+                allowed = ', '.join(sorted(self._verify_keys)) or 'none'
+                raise WsAuthError(
+                    f'JWT algorithm {algorithm!r} is not configured '
+                    f'(allowed: {allowed})',
+                )
             claims = pyjwt.decode(
                 token,
-                self._verify_key,
-                algorithms=[self._algorithm],
+                verify_key,
+                algorithms=[algorithm],
                 issuer=self._issuer,
                 audience=self._audience,
             )
+        except WsAuthError:
+            raise
         except Exception as exc:
             raise WsAuthError(f'JWT verification failed: {exc}') from exc
 

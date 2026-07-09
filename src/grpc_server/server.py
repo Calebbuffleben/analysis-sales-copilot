@@ -475,7 +475,14 @@ def create_server(config: Settings) -> grpc.Server:
         config.port,
         config.desktop_ws_coalesce_ms,
         config.desktop_ws_require_auth,
-        'RS256' if config.jwt_public_key else ('HS256' if config.jwt_secret else 'none'),
+        ','.join(
+            algorithm
+            for algorithm, configured in (
+                ('RS256', bool(config.jwt_public_key)),
+                ('HS256', bool(config.jwt_secret)),
+            )
+            if configured
+        ) or 'none',
     )
 
     if config.preload_ml_models and transcription_service is not None:
