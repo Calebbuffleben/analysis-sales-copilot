@@ -261,7 +261,7 @@ class DesktopWsGateway:
             participant_role=participant_role,
         )
         flush_threshold_bytes = max(
-            2,
+            int(sample_rate * channels * 2 * 0.05),
             int(sample_rate * channels * 2 * (self._coalesce_ms / 1000.0)),
         )
         # Single worker per connection: preserves chunk ordering for STT

@@ -257,6 +257,39 @@ def test_tab_audio_url_uses_tuned_vad(monkeypatch: Any) -> None:
     provider.close_all()
 
 
+def test_small_chunks_are_buffered_before_send(monkeypatch: Any) -> None:
+    _install_fake_websocket(monkeypatch)
+    provider = AssemblyAiStreamingProvider(
+        AssemblyAiStreamConfig(
+            api_key='test-key',
+            connect_timeout_seconds=0.2,
+            termination_timeout_seconds=0.0,
+        ),
+        lambda *_args: None,
+    )
+    meta = {
+        'meeting_id': 'meet-1',
+        'participant_id': 'seller',
+        'track': 'mic',
+        'sample_rate': 16000,
+        'channels': 1,
+        'timestamp_ms': 10_000,
+        'tenant_id': 'tenant-1',
+    }
+    small_chunk = b'\x01\x00' * 640  # 40ms — below AssemblyAI minimum
+    provider.send_audio('meet-1:seller:mic', small_chunk, meta)
+    fake_ws = _FakeWebSocketApp.instances[0]
+    assert fake_ws.sent == []
+
+    provider.send_audio('meet-1:seller:mic', small_chunk, meta)
+    binary_sends = [
+        payload for payload, _opcode in fake_ws.sent if isinstance(payload, (bytes, bytearray))
+    ]
+    assert len(binary_sends) == 1
+    assert len(binary_sends[0]) >= 1600
+    provider.close_all()
+
+
 def test_continuous_partials_sent_after_begin(monkeypatch: Any) -> None:
     _install_fake_websocket(monkeypatch)
     provider = AssemblyAiStreamingProvider(
