@@ -78,6 +78,7 @@ class _AssemblyAiSession:
     ws_app: Any
     thread: threading.Thread
     open_event: threading.Event = field(default_factory=threading.Event)
+    begin_event: threading.Event = field(default_factory=threading.Event)
     termination_event: threading.Event = field(default_factory=threading.Event)
     lock: threading.RLock = field(default_factory=threading.RLock)
     current_turn_pcm: bytearray = field(default_factory=bytearray)
@@ -133,6 +134,12 @@ class AssemblyAiStreamingProvider:
             self.end_stream(stream_key)
             raise RuntimeError(
                 f'AssemblyAI stream did not open within '
+                f'{self._config.connect_timeout_seconds:.1f}s for {stream_key}',
+            )
+        if not session.begin_event.wait(self._config.connect_timeout_seconds):
+            self.end_stream(stream_key)
+            raise RuntimeError(
+                f'AssemblyAI session did not begin within '
                 f'{self._config.connect_timeout_seconds:.1f}s for {stream_key}',
             )
 
@@ -225,6 +232,10 @@ class AssemblyAiStreamingProvider:
                 session = self._sessions[stream_key]
         if not session.open_event.wait(self._config.connect_timeout_seconds):
             raise RuntimeError(f'AssemblyAI stream is not open for {stream_key}')
+        if not session.begin_event.wait(self._config.connect_timeout_seconds):
+            raise RuntimeError(
+                f'AssemblyAI session did not begin for {stream_key}',
+            )
         return session
 
     def _create_session(
@@ -303,8 +314,11 @@ class AssemblyAiStreamingProvider:
             'sample_rate': sample_rate,
             'format_turns': self._config.format_turns,
         }
-        if self._config.continuous_partials:
-            params['continuous_partials'] = True
+        if (
+            self._config.continuous_partials
+            or self._partial_coordinator is not None
+        ):
+            params['enable_partial_transcripts'] = True
         if self._config.end_of_turn_confidence_threshold is not None:
             params['end_of_turn_confidence_threshold'] = (
                 self._config.end_of_turn_confidence_threshold
@@ -349,10 +363,38 @@ class AssemblyAiStreamingProvider:
 
         msg_type = payload.get('type')
         if msg_type == 'Begin':
+            session = self._get_session(stream_key)
+            if session is not None:
+                session.begin_event.set()
+                if self._config.continuous_partials:
+                    try:
+                        session.ws_app.send(
+                            json.dumps(
+                                {
+                                    'type': 'UpdateConfiguration',
+                                    'continuous_partials': True,
+                                },
+                            ),
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            'AssemblyAI continuous_partials update failed | '
+                            'stream_key=%s | error=%s',
+                            stream_key,
+                            exc,
+                        )
             logger.info(
                 'AssemblyAI session began | stream_key=%s | session_id=%s',
                 stream_key,
                 payload.get('id'),
+            )
+            return
+        if msg_type == 'Error':
+            ASSEMBLYAI_ERRORS_TOTAL.inc()
+            logger.error(
+                'AssemblyAI session error | stream_key=%s | payload=%s',
+                stream_key,
+                payload,
             )
             return
         if msg_type == 'Termination':
