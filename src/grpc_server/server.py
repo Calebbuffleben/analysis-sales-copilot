@@ -287,6 +287,8 @@ def create_server(config: Settings) -> grpc.Server:
         default_language=config.whisper_default_language,
         partial_min_confidence=config.partial_min_confidence,
         feedback_allow_host_publish=config.feedback_allow_host_publish,
+        acoustic_routing_enabled=config.acoustic_routing_enabled,
+        acoustic_shadow_mode=config.acoustic_shadow_mode,
     )
     partial_coordinator: PartialTurnCoordinator | None = None
     if config.stt_provider == 'assemblyai' and config.partial_analysis_enabled:
@@ -341,6 +343,44 @@ def create_server(config: Settings) -> grpc.Server:
     streaming_stt_provider: AssemblyAiStreamingProvider | None = None
     if config.stt_provider == 'assemblyai':
         assert config.assemblyai_api_key
+
+        def _on_assemblyai_final(
+            stream_key: str,
+            chunk: object,
+            extra_stats: dict[str, object],
+        ) -> None:
+            from ..modules.text_analysis.types import TranscriptionChunk
+
+            assert isinstance(chunk, TranscriptionChunk)
+            audio_stats = {
+                k: v
+                for k, v in extra_stats.items()
+                if k
+                not in {
+                    'acoustic_class',
+                    'matched_seller_id',
+                    'correlation_confidence',
+                    'seller_room_id',
+                }
+            }
+            extra_meta = {
+                k: extra_stats[k]
+                for k in (
+                    'acoustic_class',
+                    'matched_seller_id',
+                    'correlation_confidence',
+                    'seller_room_id',
+                )
+                if k in extra_stats
+            }
+            transcription_pipeline_service.process_transcript(
+                stream_key,
+                chunk,
+                audio_stats,
+                transcript_source='final',
+                extra_meta=extra_meta or None,
+            )
+
         streaming_stt_provider = AssemblyAiStreamingProvider(
             AssemblyAiStreamConfig(
                 api_key=config.assemblyai_api_key,
@@ -365,7 +405,7 @@ def create_server(config: Settings) -> grpc.Server:
                     config.assemblyai_tab_audio_max_turn_silence_ms
                 ),
             ),
-            transcription_pipeline_service.process_transcript,
+            _on_assemblyai_final,
             partial_coordinator=partial_coordinator,
         )
     else:

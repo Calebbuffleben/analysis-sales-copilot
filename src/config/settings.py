@@ -62,6 +62,9 @@ class Settings:
     partial_cooldown_ms: int = 3000
     partial_min_confidence: float = 0.7
     feedback_allow_host_publish: bool = False
+    # Seller Rooms acoustic routing: kill switch + shadow (classify, don't change routing).
+    acoustic_routing_enabled: bool = True
+    acoustic_shadow_mode: bool = False
     # STT process parallelism (Phase 5): 0 = in-process + lock; N>=1 = N worker processes,
     # each with its own WhisperModel (true parallel transcribe).
     stt_process_workers: int = 0
@@ -259,6 +262,16 @@ class Settings:
             partial_min_confidence=float(os.getenv('PARTIAL_MIN_CONFIDENCE', '0.7')),
             feedback_allow_host_publish=os.getenv(
                 'FEEDBACK_ALLOW_HOST_PUBLISH',
+                'false',
+            ).lower()
+            == 'true',
+            acoustic_routing_enabled=os.getenv(
+                'ACOUSTIC_ROUTING_ENABLED',
+                'true',
+            ).lower()
+            == 'true',
+            acoustic_shadow_mode=os.getenv(
+                'ACOUSTIC_SHADOW_MODE',
                 'false',
             ).lower()
             == 'true',

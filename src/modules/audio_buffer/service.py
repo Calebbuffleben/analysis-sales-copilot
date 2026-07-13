@@ -52,6 +52,10 @@ class AudioBufferState:
     last_sequence: int
     tenant_id: str = ''
     participant_role: str = ''
+    acoustic_class: str = ''
+    seller_room_id: str = ''
+    matched_seller_id: str = ''
+    correlation_confidence: float = 0.0
 
 
 class AudioBufferService:
@@ -81,6 +85,10 @@ class AudioBufferService:
         sequence: int,
         tenant_id: str = '',
         participant_role: str = '',
+        acoustic_class: str = '',
+        seller_room_id: str = '',
+        matched_seller_id: str = '',
+        correlation_confidence: float = 0.0,
     ) -> None:
         """Append audio to the stream buffer and notify the worker."""
         pcm_data = self._extract_pcm(wav_data)
@@ -103,6 +111,14 @@ class AudioBufferService:
             state.tenant_id = tenant_id
         if participant_role and not state.participant_role:
             state.participant_role = participant_role
+        if acoustic_class:
+            state.acoustic_class = acoustic_class
+        if seller_room_id:
+            state.seller_room_id = seller_room_id
+        if matched_seller_id:
+            state.matched_seller_id = matched_seller_id
+        if correlation_confidence:
+            state.correlation_confidence = float(correlation_confidence)
         self._worker.on_chunk_appended(stream_key, timestamp_ms)
 
     def get_window(self, stream_key: str) -> Optional[bytes]:
@@ -142,6 +158,10 @@ class AudioBufferService:
             'window_end_ms': window_end_ms,
             'tenant_id': state.tenant_id,
             'participant_role': state.participant_role,
+            'acoustic_class': state.acoustic_class,
+            'seller_room_id': state.seller_room_id,
+            'matched_seller_id': state.matched_seller_id,
+            'correlation_confidence': state.correlation_confidence,
         }
 
     def end_stream(self, stream_key: str) -> None:

@@ -6,6 +6,7 @@ websockets>=12.0
 PyJWT>=2.8.0
 cryptography>=42.0
 soundfile
+numpy>=1.26
 google-genai>=1.28.0
 prometheus-client
 pydantic>=2.0

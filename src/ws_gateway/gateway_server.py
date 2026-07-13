@@ -27,6 +27,12 @@ from urllib.parse import parse_qs, urlparse
 
 from .feedback_hub import FeedbackHub
 from .jwt_auth import DesktopWsAuthenticator, WsAuthError
+from ..modules.acoustic_fingerprint.pcm_v2 import (
+    AcousticLabelBuffer,
+    is_pcm_v2,
+    parse_label_control,
+    try_decode_pcm_v2,
+)
 
 if TYPE_CHECKING:
     from ..services.audio_service import AudioService
@@ -53,10 +59,16 @@ class _AudioStreamState:
         'channels',
         'tenant_id',
         'participant_role',
+        'seller_room_id',
+        'pcm_version',
+        'label_buffer',
         'buffer',
         'buffer_started_ms',
         'sequence',
         'started',
+        'acoustic_class',
+        'matched_seller_id',
+        'correlation_confidence',
     )
 
     def __init__(
@@ -69,6 +81,8 @@ class _AudioStreamState:
         channels: int,
         tenant_id: str,
         participant_role: str,
+        seller_room_id: str = '',
+        pcm_version: int = 1,
     ) -> None:
         self.meeting_id = meeting_id
         self.participant_id = participant_id
@@ -77,10 +91,16 @@ class _AudioStreamState:
         self.channels = channels
         self.tenant_id = tenant_id
         self.participant_role = participant_role
+        self.seller_room_id = seller_room_id
+        self.pcm_version = pcm_version
+        self.label_buffer = AcousticLabelBuffer()
         self.buffer = bytearray()
         self.buffer_started_ms: Optional[int] = None
         self.sequence = 0
         self.started = False
+        self.acoustic_class = 'unknown'
+        self.matched_seller_id = ''
+        self.correlation_confidence = 0.0
 
 
 class DesktopWsGateway:
@@ -242,6 +262,11 @@ class DesktopWsGateway:
         participant_id = _sanitize(query.get('participant') or user_id or 'desktop')
         track = _sanitize(query.get('track') or 'tab-audio')
         participant_role = _sanitize(query.get('participantRole') or '')
+        seller_room_id = _sanitize(query.get('sellerRoomId') or '')
+        try:
+            pcm_version = int(query.get('pcmVersion') or 1)
+        except ValueError:
+            pcm_version = 1
         try:
             sample_rate = int(query.get('sampleRate') or 16000)
         except ValueError:
@@ -259,6 +284,8 @@ class DesktopWsGateway:
             channels=channels,
             tenant_id=tenant_id,
             participant_role=participant_role,
+            seller_room_id=seller_room_id,
+            pcm_version=pcm_version,
         )
         flush_threshold_bytes = max(
             int(sample_rate * channels * 2 * 0.05),
@@ -292,9 +319,8 @@ class DesktopWsGateway:
                         executor,
                     )
                 else:
-                    # Text frames on the audio channel are control messages;
-                    # only `ping` is understood today.
-                    self._on_control_message(websocket, frame)
+                    # Text frames: ping or acoustic_label control.
+                    self._on_audio_control(state, websocket, frame)
         except Exception:
             logger.debug('ws audio connection closed with error', exc_info=True)
         finally:
@@ -307,13 +333,29 @@ class DesktopWsGateway:
             message = json.loads(raw)
         except (TypeError, ValueError):
             return
-        if isinstance(message, dict) and message.get('type') == 'ping':
-            # Called from within the gateway loop (async for), so a task is enough.
+        if not isinstance(message, dict):
+            return
+        if message.get('type') == 'ping' and websocket is not None:
             asyncio.get_running_loop().create_task(
                 websocket.send(
                     json.dumps({'type': 'pong', 'ts': int(time.time() * 1000)}),
                 ),
             )
+
+    def _on_audio_control(
+        self,
+        state: _AudioStreamState,
+        websocket: Any,
+        raw: str,
+    ) -> None:
+        label = parse_label_control(raw)
+        if label is None:
+            self._on_control_message(websocket, raw)
+            return
+        state.label_buffer.upsert(label)
+        state.acoustic_class = label.acoustic_class
+        state.matched_seller_id = label.matched_seller_id or ''
+        state.correlation_confidence = label.confidence
 
     # ------------------------------------------------------------------ #
     # Audio plumbing (runs on the gateway loop; heavy work offloaded)
@@ -327,23 +369,33 @@ class DesktopWsGateway:
         executor: ThreadPoolExecutor,
     ) -> None:
         now_ms = int(time.time() * 1000)
+        pcm = data
+        if is_pcm_v2(data):
+            framed = try_decode_pcm_v2(data)
+            if framed is None:
+                return
+            pcm = framed.pcm
+            label = state.label_buffer.resolve_for_label_id(framed.label_id)
+            if label is not None:
+                state.acoustic_class = label.acoustic_class
+                state.matched_seller_id = label.matched_seller_id or ''
+                state.correlation_confidence = label.confidence
+
         if not state.buffer:
             state.buffer_started_ms = now_ms
-        state.buffer.extend(data)
+        state.buffer.extend(pcm)
 
         elapsed_ms = now_ms - (state.buffer_started_ms or now_ms)
         if (
             len(state.buffer) >= flush_threshold_bytes
             or elapsed_ms >= self._coalesce_ms * 2
         ):
-            pcm = bytes(state.buffer)
+            flush_pcm = bytes(state.buffer)
             state.buffer.clear()
             state.buffer_started_ms = None
             state.sequence += 1
             sequence = state.sequence
-            # process_chunk fans out to AssemblyAI/buffers; keep it off the
-            # event loop so slow consumers never stall audio reads.
-            executor.submit(self._process_pcm, state, pcm, sequence, now_ms)
+            executor.submit(self._process_pcm, state, flush_pcm, sequence, now_ms)
 
     def _process_pcm(
         self,
@@ -371,6 +423,10 @@ class DesktopWsGateway:
                 timestamp_ms=timestamp_ms,
                 tenant_id=state.tenant_id,
                 participant_role=state.participant_role,
+                acoustic_class=state.acoustic_class,
+                seller_room_id=state.seller_room_id,
+                matched_seller_id=state.matched_seller_id,
+                correlation_confidence=state.correlation_confidence,
             )
         except Exception:
             logger.exception(

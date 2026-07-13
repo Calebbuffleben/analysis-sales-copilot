@@ -171,6 +171,14 @@ class PartialTurnCoordinator:
             'transcriptSource': 'partial',
             'completenessReason': completeness.reason,
             'turnOpenMs': turn_open_ms,
+            'acoustic_class': meta.get('acoustic_class') or meta.get('acousticClass') or '',
+            'matched_seller_id': meta.get('matched_seller_id')
+            or meta.get('matchedSellerId')
+            or '',
+            'correlation_confidence': meta.get('correlation_confidence')
+            or meta.get('correlationConfidence')
+            or 0,
+            'seller_room_id': meta.get('seller_room_id') or meta.get('sellerRoomId') or '',
         }
         logger.info(
             'partial stable ready | stream=%s | reason=%s | chars=%s',

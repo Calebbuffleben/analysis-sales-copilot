@@ -19,6 +19,10 @@ message AudioChunk {
   string tenant_id = 9;
   string user_id = 10;
   string participant_role = 11;  // host | participant | unknown
+  string acoustic_class = 12;    // seller | customer | unknown (loopback only)
+  string seller_room_id = 13;
+  string matched_seller_id = 14;
+  float correlation_confidence = 15;
 }
 
 message StreamAudioResponse {

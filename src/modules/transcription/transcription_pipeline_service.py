@@ -16,12 +16,15 @@ from ..text_analysis.types import TextAnalysisResult, TranscriptionChunk
 
 from ...metrics.realtime_metrics import (
     ANALYSIS_MS,
+    ACOUSTIC_CLASS_TOTAL,
+    ACOUSTIC_ROUTING_SKIPPED_TOTAL,
     PIPELINE_TOTAL_MS,
     STT_MS,
     WINDOW_END_TO_PIPELINE_START_MS,
     WINDOW_PROCESSED_TOTAL,
     WINDOW_SKIPPED_EMPTY_TOTAL,
 )
+from ..acoustic_fingerprint.correlation_metrics import CORRELATION_METRICS
 from .partial_turn_coordinator import FinalAction, PartialTurnCoordinator
 from .transcription_service import TranscriptionService
 from .utterance_completeness import text_fingerprint
@@ -31,6 +34,94 @@ logger = logging.getLogger(__name__)
 
 def _is_host_role(role: object) -> bool:
     return str(role or '').strip().lower() == 'host'
+
+
+def _normalize_acoustic_class(value: object) -> str:
+    normalized = str(value or '').strip().lower()
+    if normalized in {'seller', 'customer', 'unknown'}:
+        return normalized
+    return ''
+
+
+def _resolve_routing_class(
+    *,
+    acoustic_class: object = '',
+    extra_meta: Optional[dict[str, object]] = None,
+    routing_enabled: bool = True,
+    shadow_mode: bool = False,
+    record_metrics: bool = True,
+) -> str:
+    """Return class used for routing; empty means ignore acoustic routing."""
+    meta = extra_meta or {}
+    cls = _normalize_acoustic_class(
+        acoustic_class or meta.get('acoustic_class') or meta.get('acousticClass'),
+    )
+    if not cls:
+        return ''
+    if record_metrics:
+        mode = 'shadow' if shadow_mode else 'active'
+        ACOUSTIC_CLASS_TOTAL.labels(acoustic_class=cls, mode=mode).inc()
+        CORRELATION_METRICS.observe_window(
+            acoustic_class=cls,
+            confidence=float(
+                meta.get('correlation_confidence')
+                or meta.get('correlationConfidence')
+                or 0.0,
+            ),
+        )
+    if not routing_enabled:
+        if record_metrics:
+            ACOUSTIC_ROUTING_SKIPPED_TOTAL.labels(reason='disabled').inc()
+        return ''
+    if shadow_mode:
+        if record_metrics:
+            ACOUSTIC_ROUTING_SKIPPED_TOTAL.labels(reason='shadow').inc()
+        return ''
+    return cls
+
+
+def _should_observe_only(
+    *,
+    participant_role: object,
+    acoustic_class: object = '',
+    extra_meta: Optional[dict[str, object]] = None,
+    routing_enabled: bool = True,
+    shadow_mode: bool = False,
+    record_metrics: bool = True,
+) -> bool:
+    """Host mic OR loopback classified as seller → context only, no feedback."""
+    if _is_host_role(participant_role):
+        return True
+    cls = _resolve_routing_class(
+        acoustic_class=acoustic_class,
+        extra_meta=extra_meta,
+        routing_enabled=routing_enabled,
+        shadow_mode=shadow_mode,
+        record_metrics=record_metrics,
+    )
+    return cls == 'seller'
+
+
+def _should_suppress_partial_publish(
+    *,
+    participant_role: object,
+    acoustic_class: object = '',
+    extra_meta: Optional[dict[str, object]] = None,
+    routing_enabled: bool = True,
+    shadow_mode: bool = False,
+    record_metrics: bool = False,
+) -> bool:
+    """Partials on seller/unknown loopback must not publish feedback."""
+    if _is_host_role(participant_role):
+        return True
+    cls = _resolve_routing_class(
+        acoustic_class=acoustic_class,
+        extra_meta=extra_meta,
+        routing_enabled=routing_enabled,
+        shadow_mode=shadow_mode,
+        record_metrics=record_metrics,
+    )
+    return cls in {'seller', 'unknown'}
 
 
 class TranscriptionPipelineService:
@@ -46,6 +137,8 @@ class TranscriptionPipelineService:
         partial_coordinator: Optional[PartialTurnCoordinator] = None,
         partial_min_confidence: float = 0.7,
         feedback_allow_host_publish: bool = False,
+        acoustic_routing_enabled: bool = True,
+        acoustic_shadow_mode: bool = False,
     ) -> None:
         self._transcription_service = transcription_service
         self._text_analysis_service = text_analysis_service
@@ -55,6 +148,8 @@ class TranscriptionPipelineService:
         self._partial_coordinator = partial_coordinator
         self._partial_min_confidence = partial_min_confidence
         self._feedback_allow_host_publish = feedback_allow_host_publish
+        self._acoustic_routing_enabled = acoustic_routing_enabled
+        self._acoustic_shadow_mode = acoustic_shadow_mode
 
 
     def _on_window_ready(
@@ -168,8 +263,14 @@ class TranscriptionPipelineService:
         )
         logger.info(f"[Step 3] Enviando transcrição para análise do Gemini")
         t_ana_start = time.perf_counter()
-        is_host = _is_host_role(chunk.participant_role)
-        if is_host:
+        observe_only = _should_observe_only(
+            participant_role=chunk.participant_role,
+            acoustic_class=enriched_meta.get('acoustic_class'),
+            extra_meta=enriched_meta,
+            routing_enabled=self._acoustic_routing_enabled,
+            shadow_mode=self._acoustic_shadow_mode,
+        )
+        if observe_only:
             analysis = self._text_analysis_service.observe_context(chunk)
         else:
             analysis = self._text_analysis_service.analyze(chunk)
@@ -178,7 +279,7 @@ class TranscriptionPipelineService:
         ANALYSIS_MS.observe((t_ana_end - t_ana_start) * 1000.0)
         t_pub_start = time.perf_counter()
         published_enqueued = (
-            False if is_host else self._handle_transcript(stream_key, chunk, analysis)
+            False if observe_only else self._handle_transcript(stream_key, chunk, analysis)
         )
         t_pub_end = time.perf_counter()
 
@@ -213,7 +314,10 @@ class TranscriptionPipelineService:
                 'enqueueMs': round(enqueue_ms, 1),
                 'totalMs': round(total_ms, 1),
                 'hasDirectFeedback': bool(analysis.direct_feedback),
-                'contextOnly': is_host,
+                'contextOnly': observe_only,
+                'acousticClass': _normalize_acoustic_class(
+                    enriched_meta.get('acoustic_class'),
+                ),
                 'transcriptChars': len(chunk.text or ''),
             },
         )
@@ -280,10 +384,27 @@ class TranscriptionPipelineService:
             )
         logger.info("[Step 3] Enviando transcrição para análise do Gemini")
         t_ana_start = time.perf_counter()
-        is_host = _is_host_role(chunk.participant_role)
-        publish_host = is_host and self._feedback_allow_host_publish
+        observe_only = _should_observe_only(
+            participant_role=chunk.participant_role,
+            acoustic_class=meta.get('acoustic_class'),
+            extra_meta=meta,
+            routing_enabled=self._acoustic_routing_enabled,
+            shadow_mode=self._acoustic_shadow_mode,
+        )
+        publish_host = (
+            _is_host_role(chunk.participant_role)
+            and self._feedback_allow_host_publish
+            and _normalize_acoustic_class(meta.get('acoustic_class')) != 'seller'
+        )
+        suppress_partial = _should_suppress_partial_publish(
+            participant_role=chunk.participant_role,
+            acoustic_class=meta.get('acoustic_class'),
+            extra_meta=meta,
+            routing_enabled=self._acoustic_routing_enabled,
+            shadow_mode=self._acoustic_shadow_mode,
+        )
 
-        if is_host and not publish_host:
+        if observe_only and not publish_host:
             analysis = self._text_analysis_service.observe_context(chunk)
         else:
             analysis = self._text_analysis_service.analyze(chunk)
@@ -294,7 +415,14 @@ class TranscriptionPipelineService:
         t_pub_start = time.perf_counter()
         published_enqueued = False
         if source == 'partial':
-            if (
+            if suppress_partial:
+                logger.info(
+                    'Partial publish suppressed by acoustic class | '
+                    'stream_key=%s | acousticClass=%s',
+                    stream_key,
+                    _normalize_acoustic_class(meta.get('acoustic_class')),
+                )
+            elif (
                 analysis.direct_feedback
                 and analysis.confidence >= self._partial_min_confidence
             ):
@@ -317,7 +445,7 @@ class TranscriptionPipelineService:
                     bool(analysis.direct_feedback),
                     analysis.confidence,
                 )
-        elif publish_host or not is_host:
+        elif publish_host or not observe_only:
             published_enqueued = self._handle_transcript(
                 stream_key,
                 chunk,
@@ -373,7 +501,8 @@ class TranscriptionPipelineService:
                 'enqueueMs': round(enqueue_ms, 1),
                 'totalMs': round(total_ms, 1),
                 'hasDirectFeedback': bool(analysis.direct_feedback),
-                'contextOnly': is_host and not publish_host,
+                'contextOnly': observe_only and not publish_host,
+                'acousticClass': _normalize_acoustic_class(meta.get('acoustic_class')),
                 'transcriptChars': len(chunk.text or ''),
                 **{
                     key: meta[key]

@@ -40,6 +40,10 @@ from .partial_turn_coordinator import PartialTurnCoordinator
 from ..audio_buffer.audio_diagnostics import compute_pcm_window_stats
 from ..audio_buffer.service import WAV_HEADER_BYTES
 from ..text_analysis.types import TranscriptionChunk
+from ..acoustic_fingerprint.pcm_v2 import (
+    AcousticLabelBuffer,
+    AcousticWindowLabel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +98,8 @@ class _AssemblyAiSession:
     bytes_sent: int = 0
     reconnects: int = 0
     closed: bool = False
+    label_buffer: AcousticLabelBuffer = field(default_factory=AcousticLabelBuffer)
+    label_seq: int = 0
 
 
 class AssemblyAiStreamingProvider:
@@ -166,6 +172,7 @@ class AssemblyAiStreamingProvider:
         with session.lock:
             now_ms = int(time.time() * 1000)
             timestamp_ms = int(meta.get('timestamp_ms', now_ms) or now_ms)
+            self._merge_acoustic_meta(session, meta, timestamp_ms)
             if session.current_turn_start_ms is None:
                 is_turn_start = True
                 duration_ms = self._duration_ms(
@@ -465,6 +472,14 @@ class AssemblyAiStreamingProvider:
             partial_meta['turn_start_ms'] = turn_start_ms
             words = payload.get('words')
             partial_meta['transcript_confidence'] = self._confidence_from_words(words)
+            aggregated = session.label_buffer.aggregate(
+                turn_start_ms,
+                int(session.last_audio_timestamp_ms or turn_start_ms or now_ms),
+            )
+            if aggregated != 'unknown':
+                partial_meta['acoustic_class'] = aggregated
+            elif not partial_meta.get('acoustic_class'):
+                partial_meta['acoustic_class'] = session.label_buffer.current_class()
 
         self._partial_coordinator.handle_partial(
             stream_key,
@@ -497,6 +512,11 @@ class AssemblyAiStreamingProvider:
                 or int(time.time() * 1000),
             )
             wall_end_ms = session.last_audio_wall_ms
+            acoustic_extra = self._build_acoustic_extra(
+                session,
+                window_start_ms,
+                window_end_ms,
+            )
             session.current_turn_pcm.clear()
             session.current_turn_start_ms = None
 
@@ -574,6 +594,7 @@ class AssemblyAiStreamingProvider:
             'assemblyai_end_of_turn_confidence': payload.get(
                 'end_of_turn_confidence',
             ),
+            **acoustic_extra,
         }
         self._callback_executor.submit(
             self._on_final_transcript,
@@ -705,6 +726,77 @@ class AssemblyAiStreamingProvider:
     def _get_session(self, stream_key: str) -> Optional[_AssemblyAiSession]:
         with self._lock:
             return self._sessions.get(stream_key)
+
+    @staticmethod
+    def _merge_acoustic_meta(
+        session: _AssemblyAiSession,
+        meta: dict[str, object],
+        timestamp_ms: int,
+    ) -> None:
+        """Keep session.meta acoustic fields fresh and record turn labels."""
+        for key in (
+            'acoustic_class',
+            'matched_seller_id',
+            'correlation_confidence',
+            'seller_room_id',
+            'participant_role',
+            'tenant_id',
+            'meeting_id',
+            'participant_id',
+            'track',
+        ):
+            if key in meta and meta[key] not in (None, ''):
+                session.meta[key] = meta[key]
+
+        acoustic_class = str(meta.get('acoustic_class') or '').strip().lower()
+        if acoustic_class not in {'seller', 'customer', 'unknown'}:
+            return
+        duration_hint = 200
+        window_start = int(
+            meta.get('window_start_ms')
+            or max(0, timestamp_ms - duration_hint),
+        )
+        window_end = int(meta.get('window_end_ms') or timestamp_ms)
+        session.label_seq += 1
+        label = AcousticWindowLabel(
+            label_id=session.label_seq,
+            acoustic_class=acoustic_class,  # type: ignore[arg-type]
+            matched_seller_id=(
+                str(meta['matched_seller_id'])
+                if meta.get('matched_seller_id')
+                else None
+            ),
+            confidence=float(meta.get('correlation_confidence') or 0.0),
+            lag_ms=int(meta.get('correlation_lag_ms') or 0),
+            window_start_ms=window_start,
+            window_end_ms=max(window_end, window_start + 1),
+        )
+        session.label_buffer.upsert(label)
+
+    @staticmethod
+    def _build_acoustic_extra(
+        session: _AssemblyAiSession,
+        window_start_ms: int,
+        window_end_ms: int,
+    ) -> dict[str, object]:
+        aggregated = session.label_buffer.aggregate(window_start_ms, window_end_ms)
+        if aggregated == 'unknown':
+            current = session.label_buffer.current_class()
+            # Prefer last scalar from meta when buffer has no overlap.
+            scalar = str(session.meta.get('acoustic_class') or '').strip().lower()
+            if scalar in {'seller', 'customer', 'unknown'}:
+                aggregated = scalar  # type: ignore[assignment]
+            elif current != 'unknown':
+                aggregated = current
+        out: dict[str, object] = {
+            'acoustic_class': aggregated,
+            'seller_room_id': session.meta.get('seller_room_id') or '',
+            'matched_seller_id': session.meta.get('matched_seller_id') or '',
+            'correlation_confidence': float(
+                session.meta.get('correlation_confidence') or 0.0,
+            ),
+        }
+        return out
 
     def _reset_turn_audio(self, session: _AssemblyAiSession) -> None:
         with session.lock:

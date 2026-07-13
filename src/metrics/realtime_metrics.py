@@ -402,3 +402,17 @@ GEMINI_KEY_RPM_LIMITED_TOTAL = _metric_or_noop(
     ['slot'],
 )
 
+ACOUSTIC_CLASS_TOTAL = _metric_or_noop(
+    Counter,
+    'acoustic_class_total',
+    'Acoustic class labels observed on STT turns (seller/customer/unknown).',
+    ['acoustic_class', 'mode'],
+)
+
+ACOUSTIC_ROUTING_SKIPPED_TOTAL = _metric_or_noop(
+    Counter,
+    'acoustic_routing_skipped_total',
+    'Turns where acoustic routing was disabled or shadow mode ignored class.',
+    ['reason'],
+)
+
