@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import struct
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from src.config.settings import Settings
 from src.modules.audio_buffer.manual_vad import ManualVad
+from src.modules.text_analysis.gemini_live_session import GeminiLiveManager
 from src.modules.text_analysis.live_cost import MeetingCostTracker, estimate_cost_usd
 from src.modules.text_analysis.live_feedback_publisher import LiveFeedbackPublisher
 from src.modules.backend_feedback.types import BackendFeedbackEvent
@@ -182,3 +186,92 @@ def test_live_mode_requires_gemini() -> None:
         assert 'requires LLM_PROVIDER=gemini' in str(exc)
     else:
         raise AssertionError('Expected live mode without gemini to fail')
+
+
+def test_receive_loop_restarts_after_turn_complete() -> None:
+    """SDK receive() ends on turn_complete; we must restart for turn 2+."""
+
+    class _FakeLive:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def receive(self):
+            self.calls += 1
+            call = self.calls
+
+            async def _gen():
+                if call == 1:
+                    yield SimpleNamespace(
+                        usage_metadata=None,
+                        session_resumption_update=None,
+                        data=None,
+                        tool_call=None,
+                        server_content=SimpleNamespace(turn_complete=True),
+                    )
+                    return
+                if call == 2:
+                    yield SimpleNamespace(
+                        usage_metadata=None,
+                        session_resumption_update=None,
+                        data=None,
+                        tool_call=None,
+                        server_content=SimpleNamespace(turn_complete=True),
+                    )
+                    return
+                # Keep the loop parked until cancelled on third receive().
+                await asyncio.sleep(3600)
+                if False:  # pragma: no cover
+                    yield None
+
+            return _gen()
+
+    async def _run() -> int:
+        manager = GeminiLiveManager(
+            api_key='AIzaSyTest',
+            publisher=MagicMock(),
+        )
+        session = SimpleNamespace(
+            available=True,
+            meeting_id='m1',
+            cost=MeetingCostTracker(meeting_id='m1', max_cost_usd=3.0),
+            awaiting_tool=True,
+            model_turn_done=asyncio.Event(),
+            resumption_handle=None,
+            send_lock=asyncio.Lock(),
+            pending_turn=None,
+            tenant_id='t1',
+        )
+        live = _FakeLive()
+        task = asyncio.create_task(
+            manager._receive_loop(session, live, types=MagicMock()),
+        )
+        await asyncio.sleep(0.05)
+        assert live.calls >= 2
+        assert session.awaiting_tool is False
+        assert session.model_turn_done.is_set()
+        session.available = False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return live.calls
+
+    assert asyncio.run(_run()) >= 2
+
+
+def test_inject_host_context_does_not_enqueue_realtime() -> None:
+    manager = GeminiLiveManager(api_key='AIzaSyTest', publisher=MagicMock())
+    from src.modules.text_analysis.gemini_live_session import _MeetingSession
+
+    session = _MeetingSession(
+        meeting_id='m1',
+        tenant_id='t1',
+        api_key='AIzaSyTest',
+        model_name='gemini-3.1-flash-live-preview',
+        cost=MeetingCostTracker(meeting_id='m1', max_cost_usd=3.0),
+    )
+    manager._sessions['m1'] = session
+    manager.inject_host_context('m1', 'Host said pricing is flexible')
+    assert 'pricing' in session.context_summary
+    assert session.queue.empty()

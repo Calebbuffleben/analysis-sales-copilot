@@ -62,57 +62,82 @@ async def run_spike(api_key: str, model: str) -> dict:
     result = {
         'model': model,
         'tool_call': False,
+        'tool_calls': 0,
         'vad_end_to_tool_ms': None,
         'unexpected_audio_bytes': 0,
         'error': None,
     }
 
-    turn_id = f'spike-{int(time.time())}'
-    speech_end_ms = None
-
     try:
         async with client.aio.live.connect(model=model, config=config) as session:
-            await session.send_realtime_input(activity_start=types.ActivityStart())
-            await session.send_realtime_input(
-                text=(
-                    f'Turno iniciado. turnId="{turn_id}". '
-                    'Ao final chame emit_feedback uma vez com este turnId. '
-                    'O cliente disse: "está muito caro para mim agora".'
-                ),
-            )
-            pcm = _tone(900)
-            await session.send_realtime_input(
-                audio=types.Blob(data=pcm, mime_type='audio/pcm;rate=16000'),
-            )
-            speech_end_ms = int(time.time() * 1000)
-            await session.send_realtime_input(activity_end=types.ActivityEnd())
+            for turn_idx in range(2):
+                turn_id = f'spike-{turn_idx}-{int(time.time())}'
+                phrases = (
+                    'está muito caro para mim agora',
+                    'preciso falar com meu sócio antes de decidir',
+                )
+                await session.send_realtime_input(activity_start=types.ActivityStart())
+                await session.send_realtime_input(
+                    text=(
+                        f'Turno iniciado. turnId="{turn_id}". '
+                        'Ao final chame emit_feedback uma vez com este turnId. '
+                        f'O cliente disse: "{phrases[turn_idx]}".'
+                    ),
+                )
+                pcm = _tone(900)
+                await session.send_realtime_input(
+                    audio=types.Blob(data=pcm, mime_type='audio/pcm;rate=16000'),
+                )
+                speech_end_ms = int(time.time() * 1000)
+                await session.send_realtime_input(activity_end=types.ActivityEnd())
 
-            deadline = time.time() + 12.0
-            async for response in session.receive():
-                if getattr(response, 'data', None):
-                    result['unexpected_audio_bytes'] += len(response.data)
-                tool_call = getattr(response, 'tool_call', None)
-                if tool_call is not None:
-                    result['tool_call'] = True
-                    result['vad_end_to_tool_ms'] = max(
-                        0,
-                        int(time.time() * 1000) - int(speech_end_ms or 0),
+                deadline = time.time() + 12.0
+                got_tool = False
+                # receive() ends after turn_complete — restart for each model turn.
+                while time.time() < deadline and not got_tool:
+                    async for response in session.receive():
+                        if getattr(response, 'data', None):
+                            result['unexpected_audio_bytes'] += len(response.data)
+                        tool_call = getattr(response, 'tool_call', None)
+                        if tool_call is not None:
+                            got_tool = True
+                            result['tool_call'] = True
+                            result['tool_calls'] = int(result['tool_calls']) + 1
+                            if result['vad_end_to_tool_ms'] is None:
+                                result['vad_end_to_tool_ms'] = max(
+                                    0,
+                                    int(time.time() * 1000) - speech_end_ms,
+                                )
+                            for fc in tool_call.function_calls or []:
+                                args = getattr(fc, 'args', {}) or {}
+                                result['args'] = (
+                                    args if isinstance(args, dict) else str(args)
+                                )
+                                await session.send_tool_response(
+                                    function_responses=[
+                                        types.FunctionResponse(
+                                            id=fc.id,
+                                            name=fc.name,
+                                            response={'result': 'ok'},
+                                        ),
+                                    ],
+                                )
+                            break
+                        server_content = getattr(response, 'server_content', None)
+                        if (
+                            server_content is not None
+                            and getattr(server_content, 'turn_complete', False)
+                            and not got_tool
+                        ):
+                            # Turn ended without tool — exit inner receive; outer while
+                            # can retry until deadline.
+                            break
+                        if time.time() > deadline:
+                            break
+                if not got_tool:
+                    result['error'] = (
+                        f'timeout waiting for tool_call on turn {turn_idx}'
                     )
-                    for fc in tool_call.function_calls or []:
-                        args = getattr(fc, 'args', {}) or {}
-                        result['args'] = args if isinstance(args, dict) else str(args)
-                        await session.send_tool_response(
-                            function_responses=[
-                                types.FunctionResponse(
-                                    id=fc.id,
-                                    name=fc.name,
-                                    response={'result': 'ok'},
-                                ),
-                            ],
-                        )
-                    break
-                if time.time() > deadline:
-                    result['error'] = 'timeout waiting for tool_call'
                     break
     except Exception as exc:
         result['error'] = f'{type(exc).__name__}: {exc}'
@@ -136,6 +161,11 @@ def main() -> int:
     if not result.get('tool_call'):
         print('❌ FAIL: no emit_feedback tool call')
         return 3
+    if int(result.get('tool_calls') or 0) < 2:
+        print(
+            f'❌ FAIL: expected 2 tool calls across turns, got {result.get("tool_calls")}',
+        )
+        return 4
     latency = result.get('vad_end_to_tool_ms')
     if latency is not None and latency > 850:
         print(f'⚠️  tool call ok but latency {latency}ms > 850ms budget')

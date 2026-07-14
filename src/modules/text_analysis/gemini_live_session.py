@@ -45,8 +45,9 @@ EMIT_FEEDBACK_TOOL = {
             'name': 'emit_feedback',
             'description': (
                 'Emit exactly one final coaching feedback for the just-finished '
-                'customer speech turn. Call at most once per turnId. Never correct '
-                'or re-send a previous turnId. Never speak aloud — only call this tool.'
+                'customer speech turn. Call once per turnId; each new turnId needs a '
+                'new call. Never reuse an old turnId. Never speak aloud — only call '
+                'this tool.'
             ),
             'parameters': {
                 'type': 'object',
@@ -99,11 +100,11 @@ EMIT_FEEDBACK_TOOL = {
 
 SYSTEM_INSTRUCTION = (
     'Você é um copiloto de vendas de baixa latência. Ouça o áudio do CLIENTE. '
-    'Quando um turno de fala terminar, chame a ferramenta emit_feedback no máximo '
-    'uma vez com o turnId fornecido. Nunca responda por voz. Nunca corrija ou '
-    'reenvie um turnId já usado. Se não houver feedback útil, chame emit_feedback '
-    'com feedback="" e confidence=0. Priorize objection, opportunity, rapport, '
-    'closing, clarification e risk.'
+    'Sempre que um turno de fala do cliente terminar, chame emit_feedback exatamente '
+    'uma vez com o turnId daquele turno. Cada novo turnId é um turno novo — chame de '
+    'novo. Nunca reutilize um turnId antigo. Nunca responda por voz. Se não houver '
+    'feedback útil, chame emit_feedback com feedback="" e confidence=0. Priorize '
+    'objection, opportunity, rapport, closing, clarification e risk.'
 )
 
 
@@ -143,6 +144,10 @@ class _MeetingSession:
     context_summary: str = ''
     opened_wall_ms: int = 0
     rotation_minutes: float = 2.0
+    send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # True after activity_end until tool call handled or timeout.
+    awaiting_tool: bool = False
+    model_turn_done: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class GeminiLiveManager:
@@ -345,7 +350,11 @@ class GeminiLiveManager:
             asyncio.run_coroutine_threadsafe(self._close_session(session), loop)
 
     def inject_host_context(self, meeting_id: str, summary: str) -> None:
-        """Inject compact host context between turns (never mid-utterance)."""
+        """Store host summary for later session seed — never send mid-call.
+
+        Sending host text via realtime_input mid-session starts a model turn on
+        Gemini 3.1 Live and blocks subsequent client emit_feedback tool calls.
+        """
         text = (summary or '').strip()
         if not text:
             return
@@ -354,16 +363,6 @@ class GeminiLiveManager:
             if session is None:
                 return
             session.context_summary = text[:1500]
-            if session.vad.speaking:
-                return
-            payload = text
-        loop = self._loop
-        if loop is None:
-            return
-        asyncio.run_coroutine_threadsafe(
-            session.queue.put(('host_context', payload)),
-            loop,
-        )
 
     def _run_loop(self) -> None:
         loop = asyncio.new_event_loop()
@@ -439,8 +438,8 @@ class GeminiLiveManager:
                         item = await session.queue.get()
                         if item is None:
                             break
+                        # Legacy queue item — host context must not hit realtime mid-call.
                         if isinstance(item, tuple) and item and item[0] == 'host_context':
-                            await self._send_host_context(live, types, str(item[1]))
                             continue
                         event, meta = item
                         assert isinstance(event, VadEvent)
@@ -451,7 +450,7 @@ class GeminiLiveManager:
                             break
                         if self._should_rotate(session):
                             # Rotate between turns only.
-                            if not session.vad.speaking:
+                            if not session.vad.speaking and not session.awaiting_tool:
                                 session.resumption_handle = None
                                 break
                 finally:
@@ -517,23 +516,42 @@ class GeminiLiveManager:
         meta: dict[str, str],
     ) -> None:
         if event.kind == 'activity_start':
-            await live.send_realtime_input(activity_start=types.ActivityStart())
-            # Bind turn id into the model context for the upcoming tool call.
-            await live.send_realtime_input(
-                text=(
-                    f'Turno iniciado. turnId="{event.turn_id}". '
-                    'Ao final deste turno chame emit_feedback uma única vez com este turnId.'
-                ),
+            # Wait out a prior model turn so we do not start activity mid-tool.
+            if session.awaiting_tool:
+                try:
+                    await asyncio.wait_for(session.model_turn_done.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        'live.vad.start_timeout | meeting=%s | turnId=%s',
+                        session.meeting_id,
+                        event.turn_id,
+                    )
+                    session.awaiting_tool = False
+            session.model_turn_done.clear()
+            logger.info(
+                'live.vad.start | meeting=%s | turnId=%s',
+                session.meeting_id,
+                event.turn_id,
             )
+            async with session.send_lock:
+                await live.send_realtime_input(activity_start=types.ActivityStart())
+                await live.send_realtime_input(
+                    text=(
+                        f'Turno iniciado. turnId="{event.turn_id}". '
+                        'Ao final deste turno chame emit_feedback uma única vez '
+                        'com este turnId.'
+                    ),
+                )
             return
 
         if event.kind == 'audio' and event.pcm:
-            await live.send_realtime_input(
-                audio=types.Blob(
-                    data=event.pcm,
-                    mime_type='audio/pcm;rate=16000',
-                ),
-            )
+            async with session.send_lock:
+                await live.send_realtime_input(
+                    audio=types.Blob(
+                        data=event.pcm,
+                        mime_type='audio/pcm;rate=16000',
+                    ),
+                )
             LIVE_AUDIO_BYTES_SENT_TOTAL.inc(len(event.pcm))
             return
 
@@ -546,77 +564,108 @@ class GeminiLiveManager:
                 participant_id=meta['participant_id'],
                 participant_role=meta['participant_role'],
             )
-            await live.send_realtime_input(activity_end=types.ActivityEnd())
+            session.awaiting_tool = True
+            session.model_turn_done.clear()
+            logger.info(
+                'live.vad.end | meeting=%s | turnId=%s',
+                session.meeting_id,
+                event.turn_id,
+            )
+            async with session.send_lock:
+                await live.send_realtime_input(activity_end=types.ActivityEnd())
             return
 
-    async def _send_host_context(self, live: Any, types: Any, summary: str) -> None:
-        await live.send_realtime_input(
-            text=f'Contexto do vendedor/host (não gere feedback): {summary}',
-        )
-
     async def _receive_loop(self, session: _MeetingSession, live: Any, types: Any) -> None:
-        async for response in live.receive():
-            usage = getattr(response, 'usage_metadata', None)
-            if usage is not None:
+        # google-genai AsyncSession.receive() ends after each turn_complete.
+        # Outer while restarts so subsequent client turns still get tool calls.
+        # See https://github.com/googleapis/python-genai/issues/1224
+        while session.available:
+            try:
+                async for response in live.receive():
+                    await self._handle_server_message(session, live, types, response)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception(
+                    'Live receive loop error | meeting=%s | error=%s',
+                    session.meeting_id,
+                    exc,
+                )
+                break
+
+    async def _handle_server_message(
+        self,
+        session: _MeetingSession,
+        live: Any,
+        types: Any,
+        response: Any,
+    ) -> None:
+        usage = getattr(response, 'usage_metadata', None)
+        if usage is not None:
+            try:
+                payload = usage.model_dump() if hasattr(usage, 'model_dump') else dict(usage)
+            except Exception:
+                payload = {}
+            delta = session.cost.add_usage(payload)
+            if delta:
+                LIVE_COST_USD_TOTAL.inc(delta)
+                LIVE_COST_USD_PER_MEETING.set(session.cost.total_usd)
+            if session.cost.should_alert():
+                logger.warning(
+                    'Live cost alert | meeting=%s | usd=%.4f',
+                    session.meeting_id,
+                    session.cost.total_usd,
+                )
+
+        update = getattr(response, 'session_resumption_update', None)
+        if update is not None:
+            handle = getattr(update, 'new_handle', None) or getattr(
+                update,
+                'newHandle',
+                None,
+            )
+            if handle:
+                session.resumption_handle = str(handle)
+
+        if getattr(response, 'data', None):
+            nbytes = len(response.data)
+            LIVE_UNEXPECTED_AUDIO_BYTES_TOTAL.inc(nbytes)
+            session.cost.add_unexpected_audio(nbytes)
+
+        server_content = getattr(response, 'server_content', None)
+        if server_content is not None and getattr(server_content, 'turn_complete', False):
+            session.awaiting_tool = False
+            session.model_turn_done.set()
+
+        tool_call = getattr(response, 'tool_call', None)
+        if tool_call is None:
+            return
+
+        function_responses = []
+        for fc in getattr(tool_call, 'function_calls', None) or []:
+            name = getattr(fc, 'name', '') or ''
+            args = getattr(fc, 'args', None) or {}
+            if isinstance(args, str):
                 try:
-                    payload = usage.model_dump() if hasattr(usage, 'model_dump') else dict(usage)
+                    args = json.loads(args)
                 except Exception:
-                    payload = {}
-                delta = session.cost.add_usage(payload)
-                if delta:
-                    LIVE_COST_USD_TOTAL.inc(delta)
-                    LIVE_COST_USD_PER_MEETING.set(session.cost.total_usd)
-                if session.cost.should_alert():
-                    logger.warning(
-                        'Live cost alert | meeting=%s | usd=%.4f',
-                        session.meeting_id,
-                        session.cost.total_usd,
-                    )
-
-            # Capture resumption handle if present.
-            update = getattr(response, 'session_resumption_update', None)
-            if update is not None:
-                handle = getattr(update, 'new_handle', None) or getattr(
-                    update,
-                    'newHandle',
-                    None,
-                )
-                if handle:
-                    session.resumption_handle = str(handle)
-
-            if getattr(response, 'data', None):
-                nbytes = len(response.data)
-                LIVE_UNEXPECTED_AUDIO_BYTES_TOTAL.inc(nbytes)
-                session.cost.add_unexpected_audio(nbytes)
-
-            tool_call = getattr(response, 'tool_call', None)
-            if tool_call is None:
-                continue
-
-            function_responses = []
-            for fc in getattr(tool_call, 'function_calls', None) or []:
-                name = getattr(fc, 'name', '') or ''
-                args = getattr(fc, 'args', None) or {}
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except Exception:
-                        args = {}
-                if not isinstance(args, dict):
                     args = {}
+            if not isinstance(args, dict):
+                args = {}
 
-                if name == 'emit_feedback':
-                    await self._on_emit_feedback(session, args)
+            if name == 'emit_feedback':
+                await self._on_emit_feedback(session, args)
 
-                function_responses.append(
-                    types.FunctionResponse(
-                        id=getattr(fc, 'id', None) or str(uuid.uuid4()),
-                        name=name or 'emit_feedback',
-                        response={'result': 'ok'},
-                    ),
-                )
+            function_responses.append(
+                types.FunctionResponse(
+                    id=getattr(fc, 'id', None) or str(uuid.uuid4()),
+                    name=name or 'emit_feedback',
+                    response={'result': 'ok'},
+                ),
+            )
 
-            if function_responses:
+        if function_responses:
+            async with session.send_lock:
                 await live.send_tool_response(function_responses=function_responses)
 
     async def _on_emit_feedback(
