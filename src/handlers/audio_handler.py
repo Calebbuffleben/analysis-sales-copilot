@@ -91,6 +91,12 @@ class AudioPipelineServicer(audio_pipeline_pb2_grpc.AudioPipelineServiceServicer
                     timestamp_ms=chunk.timestamp_ms,
                     tenant_id=getattr(chunk, 'tenant_id', '') or '',
                     participant_role=getattr(chunk, 'participant_role', '') or '',
+                    acoustic_class=getattr(chunk, 'acoustic_class', '') or '',
+                    seller_room_id=getattr(chunk, 'seller_room_id', '') or '',
+                    matched_seller_id=getattr(chunk, 'matched_seller_id', '') or '',
+                    correlation_confidence=float(
+                        getattr(chunk, 'correlation_confidence', 0.0) or 0.0,
+                    ),
                 )
                 AUDIO_CHUNKS_PROCESSED_TOTAL.inc()
                 PIPELINE_QUEUE_SIZE.set(1 if stream_started else 0)

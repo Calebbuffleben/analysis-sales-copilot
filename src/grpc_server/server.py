@@ -43,6 +43,7 @@ from ..utils.proto_utils import (
     generate_proto_code_batch,
     validate_proto_file_list,
 )
+from ..ws_gateway import DesktopWsGateway, DesktopWsAuthenticator, FeedbackHub
 
 logger = logging.getLogger(__name__)
 
@@ -57,18 +58,26 @@ class _ServerRuntime:
         backend_feedback_client: BackendFeedbackClient,
         transcription_service: Optional[TranscriptionService] = None,
         streaming_stt_provider: Optional[AssemblyAiStreamingProvider] = None,
+        desktop_ws_gateway: Optional[DesktopWsGateway] = None,
     ) -> None:
         self.text_analysis_service = text_analysis_service
         self.publish_dispatcher = publish_dispatcher
         self.backend_feedback_client = backend_feedback_client
         self.transcription_service = transcription_service
         self.streaming_stt_provider = streaming_stt_provider
+        self.desktop_ws_gateway = desktop_ws_gateway
         self._closed = False
 
     def shutdown(self) -> None:
         if self._closed:
             return
         self._closed = True
+
+        try:
+            if self.desktop_ws_gateway is not None:
+                self.desktop_ws_gateway.stop()
+        except Exception:
+            logger.exception('Failed to stop desktop WS gateway')
 
         try:
             self.text_analysis_service.shutdown()
@@ -238,6 +247,12 @@ def create_server(config: Settings) -> grpc.Server:
         else None,
         service_jwt_provider=service_jwt_provider,
     )
+    # Direct desktop feedback hub: broadcasts locally BEFORE the backend
+    # gRPC publish; backend stays in the loop for persistence/dashboard only.
+    feedback_hub: FeedbackHub | None = None
+    if config.desktop_ws_enabled:
+        feedback_hub = FeedbackHub()
+
     publish_dispatcher = PublishDispatcher(
         backend_feedback_client.publish_feedback,
         max_queue_size=config.publish_queue_max_size,
@@ -245,6 +260,7 @@ def create_server(config: Settings) -> grpc.Server:
         max_event_age_ms=config.publish_max_age_ms,
         retry_limit=config.publish_retry_limit,
         retry_backoff_ms=config.publish_retry_backoff_ms,
+        local_broadcast_fn=feedback_hub.broadcast if feedback_hub else None,
     )
 
     # Inject publish_dispatcher into TextAnalysisService for deferred rate-limit dispatch
@@ -271,6 +287,8 @@ def create_server(config: Settings) -> grpc.Server:
         default_language=config.whisper_default_language,
         partial_min_confidence=config.partial_min_confidence,
         feedback_allow_host_publish=config.feedback_allow_host_publish,
+        acoustic_routing_enabled=config.acoustic_routing_enabled,
+        acoustic_shadow_mode=config.acoustic_shadow_mode,
     )
     partial_coordinator: PartialTurnCoordinator | None = None
     if config.stt_provider == 'assemblyai' and config.partial_analysis_enabled:
@@ -325,6 +343,44 @@ def create_server(config: Settings) -> grpc.Server:
     streaming_stt_provider: AssemblyAiStreamingProvider | None = None
     if config.stt_provider == 'assemblyai':
         assert config.assemblyai_api_key
+
+        def _on_assemblyai_final(
+            stream_key: str,
+            chunk: object,
+            extra_stats: dict[str, object],
+        ) -> None:
+            from ..modules.text_analysis.types import TranscriptionChunk
+
+            assert isinstance(chunk, TranscriptionChunk)
+            audio_stats = {
+                k: v
+                for k, v in extra_stats.items()
+                if k
+                not in {
+                    'acoustic_class',
+                    'matched_seller_id',
+                    'correlation_confidence',
+                    'seller_room_id',
+                }
+            }
+            extra_meta = {
+                k: extra_stats[k]
+                for k in (
+                    'acoustic_class',
+                    'matched_seller_id',
+                    'correlation_confidence',
+                    'seller_room_id',
+                )
+                if k in extra_stats
+            }
+            transcription_pipeline_service.process_transcript(
+                stream_key,
+                chunk,
+                audio_stats,
+                transcript_source='final',
+                extra_meta=extra_meta or None,
+            )
+
         streaming_stt_provider = AssemblyAiStreamingProvider(
             AssemblyAiStreamConfig(
                 api_key=config.assemblyai_api_key,
@@ -349,7 +405,7 @@ def create_server(config: Settings) -> grpc.Server:
                     config.assemblyai_tab_audio_max_turn_silence_ms
                 ),
             ),
-            transcription_pipeline_service.process_transcript,
+            _on_assemblyai_final,
             partial_coordinator=partial_coordinator,
         )
     else:
@@ -368,6 +424,25 @@ def create_server(config: Settings) -> grpc.Server:
         audio_buffer_service=audio_buffer_service,
         streaming_stt_provider=streaming_stt_provider,
     )
+
+    desktop_ws_gateway: DesktopWsGateway | None = None
+    if config.desktop_ws_enabled and feedback_hub is not None:
+        authenticator = DesktopWsAuthenticator(
+            jwt_public_key=config.jwt_public_key,
+            jwt_secret=config.jwt_secret,
+            issuer=config.jwt_issuer,
+            audience=config.jwt_audience,
+            require_auth=config.desktop_ws_require_auth,
+        )
+        desktop_ws_gateway = DesktopWsGateway(
+            port=config.port,
+            authenticator=authenticator,
+            feedback_hub=feedback_hub,
+            audio_service=audio_service,
+            coalesce_ms=config.desktop_ws_coalesce_ms,
+        )
+        desktop_ws_gateway.start()
+
     servicer = AudioPipelineServicer(audio_service)
 
     # Register servicer
@@ -433,6 +508,22 @@ def create_server(config: Settings) -> grpc.Server:
         config.publish_worker_threads,
         config.publish_max_age_ms,
     )
+    logger.info(
+        'Desktop WS gateway | DESKTOP_WS_ENABLED=%s | PORT=%s | '
+        'DESKTOP_WS_COALESCE_MS=%s | DESKTOP_WS_REQUIRE_AUTH=%s | jwt_alg=%s',
+        config.desktop_ws_enabled,
+        config.port,
+        config.desktop_ws_coalesce_ms,
+        config.desktop_ws_require_auth,
+        ','.join(
+            algorithm
+            for algorithm, configured in (
+                ('RS256', bool(config.jwt_public_key)),
+                ('HS256', bool(config.jwt_secret)),
+            )
+            if configured
+        ) or 'none',
+    )
 
     if config.preload_ml_models and transcription_service is not None:
         logger.info('PRELOAD_ML_MODELS=true — loading Whisper + embedding model...')
@@ -452,6 +543,7 @@ def create_server(config: Settings) -> grpc.Server:
             backend_feedback_client=backend_feedback_client,
             transcription_service=transcription_service,
             streaming_stt_provider=streaming_stt_provider,
+            desktop_ws_gateway=desktop_ws_gateway,
         ),
     )
     return server

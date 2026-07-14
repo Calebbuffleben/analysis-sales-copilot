@@ -36,5 +36,9 @@ EXPOSE 50051
 # Expor porta de métricas Prometheus
 EXPOSE 9100
 
+# Expor gateway WebSocket direto do desktop (DESKTOP_WS_ENABLED=true).
+# Railway roteia o domínio público para PORT (tipicamente 8000).
+EXPOSE 8000
+
 # Comando para iniciar o servidor
 CMD ["python", "src/main.py"]

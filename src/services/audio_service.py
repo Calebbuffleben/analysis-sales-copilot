@@ -74,17 +74,13 @@ class AudioService:
         timestamp_ms: int,
         tenant_id: str = '',
         participant_role: str = '',
+        acoustic_class: str = '',
+        seller_room_id: str = '',
+        matched_seller_id: str = '',
+        correlation_confidence: float = 0.0,
     ) -> None:
         """
         Process a single audio chunk.
-
-        Args:
-            meeting_id: Meeting identifier
-            participant_id: Participant identifier
-            track: Track identifier
-            wav_data: WAV audio data
-            sequence: Chunk sequence number
-            timestamp_ms: Timestamp in milliseconds
         """
         chunk_size = len(wav_data)
 
@@ -106,14 +102,6 @@ class AudioService:
                 f"duration={stats.duration_seconds:.2f}s"
             )
 
-        # TODO: Forward this chunk to the AudioBufferService so it can:
-        # - Manter um buffer de janela deslizante por stream (meeting_id:participant_id:track)
-        #   usando CircularBuffer.
-        # - Notificar o SlidingWindowWorker (on_chunk_appended), que decidirá
-        #   quando há janela suficiente para disparar o callback registrado.
-        # - O callback, implementado por TranscriptionPipelineService, chamará
-        #   apenas serviços internos do python-service (STT/NLP) e não fará
-        #   comunicação direta com o backend.
         if self.audio_buffer_service and stats:
             self.audio_buffer_service.push(
                 stream_key=stats.key,
@@ -124,6 +112,10 @@ class AudioService:
                 sequence=sequence,
                 tenant_id=tenant_id,
                 participant_role=participant_role,
+                acoustic_class=acoustic_class,
+                seller_room_id=seller_room_id,
+                matched_seller_id=matched_seller_id,
+                correlation_confidence=correlation_confidence,
             )
         if self.streaming_stt_provider and stats:
             try:
@@ -141,6 +133,10 @@ class AudioService:
                         'sequence': sequence,
                         'tenant_id': tenant_id,
                         'participant_role': participant_role,
+                        'acoustic_class': acoustic_class,
+                        'seller_room_id': seller_room_id,
+                        'matched_seller_id': matched_seller_id,
+                        'correlation_confidence': correlation_confidence,
                     },
                 )
             except Exception as exc:

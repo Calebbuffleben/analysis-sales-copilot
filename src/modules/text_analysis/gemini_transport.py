@@ -11,6 +11,35 @@ import requests
 logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT_SEC = 60.0
+# gemini-2.5-flash enables dynamic thinking by default; disable for lower latency.
+GEMINI_MAX_OUTPUT_TOKENS = 500
+GEMINI_THINKING_BUDGET = 0
+
+
+def rest_generation_config(*, json_mode: bool) -> dict[str, Any]:
+    """REST generationConfig payload (camelCase keys)."""
+    config: dict[str, Any] = {
+        'temperature': 0.2,
+        'maxOutputTokens': GEMINI_MAX_OUTPUT_TOKENS,
+        'thinkingConfig': {'thinkingBudget': GEMINI_THINKING_BUDGET},
+    }
+    if json_mode:
+        config['responseMimeType'] = 'application/json'
+    return config
+
+
+def sdk_generation_config(*, json_mode: bool) -> Any:
+    """SDK GenerateContentConfig with thinking disabled."""
+    from google.genai import types
+
+    kwargs: dict[str, Any] = {
+        'temperature': 0.2,
+        'max_output_tokens': GEMINI_MAX_OUTPUT_TOKENS,
+        'thinking_config': types.ThinkingConfig(thinking_budget=GEMINI_THINKING_BUDGET),
+    }
+    if json_mode:
+        kwargs['response_mime_type'] = 'application/json'
+    return types.GenerateContentConfig(**kwargs)
 
 
 class GeminiTransportMode(str, Enum):
@@ -84,9 +113,7 @@ def _rest_request(
     prompt: str,
     json_mode: bool,
 ) -> str:
-    generation_config: dict[str, Any] = {'temperature': 0.2}
-    if json_mode:
-        generation_config['responseMimeType'] = 'application/json'
+    generation_config = rest_generation_config(json_mode=json_mode)
 
     body = {
         'contents': [{'role': 'user', 'parts': [{'text': prompt}]}],
@@ -141,17 +168,13 @@ def _sdk_request(
     json_mode: bool,
 ) -> str:
     from google import genai
-    from google.genai import types
 
     vertexai = mode == GeminiTransportMode.SDK_VERTEX_EXPRESS
     client = genai.Client(api_key=api_key, vertexai=vertexai)
-    config_kwargs: dict[str, Any] = {'temperature': 0.2}
-    if json_mode:
-        config_kwargs['response_mime_type'] = 'application/json'
     response = client.models.generate_content(
         model=model_name,
         contents=prompt,
-        config=types.GenerateContentConfig(**config_kwargs),
+        config=sdk_generation_config(json_mode=json_mode),
     )
     return (response.text or '').strip()
 

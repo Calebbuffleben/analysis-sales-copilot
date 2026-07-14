@@ -38,6 +38,7 @@ class _PublishItem:
 
 
 PublishFn = Callable[[BackendFeedbackEvent], Optional[float]]
+LocalBroadcastFn = Callable[[BackendFeedbackEvent], bool]
 
 
 class PublishDispatcher:
@@ -54,6 +55,7 @@ class PublishDispatcher:
         max_event_age_ms: int = 10_000,
         retry_limit: int = 1,
         retry_backoff_ms: int = 200,
+        local_broadcast_fn: Optional[LocalBroadcastFn] = None,
     ) -> None:
         if max_queue_size < 1:
             raise ValueError('max_queue_size must be >= 1')
@@ -65,6 +67,7 @@ class PublishDispatcher:
             raise ValueError('retry_backoff_ms must be >= 0')
 
         self._publish_fn = publish_fn
+        self._local_broadcast_fn = local_broadcast_fn
         self._max_queue_size = max_queue_size
         self._max_event_age_ms = max_event_age_ms
         self._retry_limit = retry_limit
@@ -93,6 +96,19 @@ class PublishDispatcher:
         - True if accepted into the publish queue
         - False if dropped (full queue or stale event)
         """
+        # Direct desktop broadcast happens BEFORE queue/staleness gating —
+        # the local channel is the realtime critical path; the backend gRPC
+        # publish is persistence/dashboard bookkeeping only.
+        if self._local_broadcast_fn is not None:
+            try:
+                self._local_broadcast_fn(event)
+            except Exception:
+                logger.exception(
+                    'local feedback broadcast failed | meetingId=%s | participantId=%s',
+                    event.meeting_id,
+                    event.participant_id,
+                )
+
         now_ms = int(time.time() * 1000)
         event_age_ms = now_ms - int(event.window_end_ms or 0)
         if event_age_ms > self._max_event_age_ms:

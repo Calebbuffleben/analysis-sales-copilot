@@ -40,8 +40,16 @@ from .partial_turn_coordinator import PartialTurnCoordinator
 from ..audio_buffer.audio_diagnostics import compute_pcm_window_stats
 from ..audio_buffer.service import WAV_HEADER_BYTES
 from ..text_analysis.types import TranscriptionChunk
+from ..acoustic_fingerprint.pcm_v2 import (
+    AcousticLabelBuffer,
+    AcousticWindowLabel,
+)
 
 logger = logging.getLogger(__name__)
+
+# AssemblyAI requires each binary audio frame to represent 50–1000 ms of PCM.
+_MIN_SEND_MS = 50
+_MAX_SEND_MS = 1000
 
 FinalTranscriptCallback = Callable[[str, TranscriptionChunk, dict[str, object]], None]
 
@@ -58,6 +66,7 @@ class AssemblyAiStreamConfig:
     continuous_partials: bool = False
     stream_idle_timeout_ms: int = 30_000
     reconnect_limit: int = 2
+    reconnect_backoff_seconds: float = 1.5
     connect_timeout_seconds: float = 10.0
     termination_timeout_seconds: float = 2.0
     end_of_turn_confidence_threshold: Optional[float] = None
@@ -78,15 +87,19 @@ class _AssemblyAiSession:
     ws_app: Any
     thread: threading.Thread
     open_event: threading.Event = field(default_factory=threading.Event)
+    begin_event: threading.Event = field(default_factory=threading.Event)
     termination_event: threading.Event = field(default_factory=threading.Event)
     lock: threading.RLock = field(default_factory=threading.RLock)
     current_turn_pcm: bytearray = field(default_factory=bytearray)
+    pending_send_pcm: bytearray = field(default_factory=bytearray)
     current_turn_start_ms: Optional[int] = None
     last_audio_timestamp_ms: int = 0
     last_audio_wall_ms: int = 0
     bytes_sent: int = 0
     reconnects: int = 0
     closed: bool = False
+    label_buffer: AcousticLabelBuffer = field(default_factory=AcousticLabelBuffer)
+    label_seq: int = 0
 
 
 class AssemblyAiStreamingProvider:
@@ -103,6 +116,7 @@ class AssemblyAiStreamingProvider:
         self._on_final_transcript = on_final_transcript
         self._partial_coordinator = partial_coordinator
         self._sessions: dict[str, _AssemblyAiSession] = {}
+        self._reconnect_counts: dict[str, int] = {}
         self._lock = threading.RLock()
         self._callback_executor = ThreadPoolExecutor(
             max_workers=4,
@@ -135,6 +149,12 @@ class AssemblyAiStreamingProvider:
                 f'AssemblyAI stream did not open within '
                 f'{self._config.connect_timeout_seconds:.1f}s for {stream_key}',
             )
+        if not session.begin_event.wait(self._config.connect_timeout_seconds):
+            self.end_stream(stream_key)
+            raise RuntimeError(
+                f'AssemblyAI session did not begin within '
+                f'{self._config.connect_timeout_seconds:.1f}s for {stream_key}',
+            )
 
     def send_audio(
         self,
@@ -152,6 +172,7 @@ class AssemblyAiStreamingProvider:
         with session.lock:
             now_ms = int(time.time() * 1000)
             timestamp_ms = int(meta.get('timestamp_ms', now_ms) or now_ms)
+            self._merge_acoustic_meta(session, meta, timestamp_ms)
             if session.current_turn_start_ms is None:
                 is_turn_start = True
                 duration_ms = self._duration_ms(
@@ -166,22 +187,18 @@ class AssemblyAiStreamingProvider:
                         now_ms,
                     )
             session.current_turn_pcm.extend(pcm_data)
+            session.pending_send_pcm.extend(pcm_data)
             session.last_audio_timestamp_ms = timestamp_ms
             session.last_audio_wall_ms = now_ms
             session.bytes_sent += len(pcm_data)
             turn_bytes = len(session.current_turn_pcm)
 
-        note_assemblyai_audio_sent(
-            logger,
-            stream_key,
-            chunk_bytes=len(pcm_data),
-            turn_bytes=turn_bytes,
-            is_turn_start=is_turn_start,
-        )
-
         try:
-            session.ws_app.send(pcm_data, opcode=self._binary_opcode())
-            ASSEMBLYAI_AUDIO_BYTES_SENT_TOTAL.inc(len(pcm_data))
+            self._flush_send_buffer(
+                session,
+                is_turn_start=is_turn_start,
+                turn_bytes=turn_bytes,
+            )
         except Exception as exc:
             ASSEMBLYAI_ERRORS_TOTAL.inc()
             logger.warning(
@@ -191,8 +208,13 @@ class AssemblyAiStreamingProvider:
             )
             self._attempt_reconnect(stream_key, meta)
             session = self._get_or_start_session(stream_key, meta)
-            session.ws_app.send(pcm_data, opcode=self._binary_opcode())
-            ASSEMBLYAI_AUDIO_BYTES_SENT_TOTAL.inc(len(pcm_data))
+            with session.lock:
+                turn_bytes = len(session.current_turn_pcm)
+            self._flush_send_buffer(
+                session,
+                is_turn_start=False,
+                turn_bytes=turn_bytes,
+            )
 
     def end_stream(self, stream_key: str) -> None:
         """Terminate and remove a single AssemblyAI session."""
@@ -225,6 +247,10 @@ class AssemblyAiStreamingProvider:
                 session = self._sessions[stream_key]
         if not session.open_event.wait(self._config.connect_timeout_seconds):
             raise RuntimeError(f'AssemblyAI stream is not open for {stream_key}')
+        if not session.begin_event.wait(self._config.connect_timeout_seconds):
+            raise RuntimeError(
+                f'AssemblyAI session did not begin for {stream_key}',
+            )
         return session
 
     def _create_session(
@@ -303,8 +329,11 @@ class AssemblyAiStreamingProvider:
             'sample_rate': sample_rate,
             'format_turns': self._config.format_turns,
         }
-        if self._config.continuous_partials:
-            params['continuous_partials'] = True
+        if (
+            self._config.continuous_partials
+            or self._partial_coordinator is not None
+        ):
+            params['enable_partial_transcripts'] = True
         if self._config.end_of_turn_confidence_threshold is not None:
             params['end_of_turn_confidence_threshold'] = (
                 self._config.end_of_turn_confidence_threshold
@@ -349,10 +378,42 @@ class AssemblyAiStreamingProvider:
 
         msg_type = payload.get('type')
         if msg_type == 'Begin':
+            self._reconnect_counts.pop(stream_key, None)
+            session = self._get_session(stream_key)
+            if session is not None:
+                session.begin_event.set()
+                if self._config.continuous_partials:
+                    try:
+                        session.ws_app.send(
+                            json.dumps(
+                                {
+                                    'type': 'UpdateConfiguration',
+                                    'continuous_partials': True,
+                                },
+                            ),
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            'AssemblyAI continuous_partials update failed | '
+                            'stream_key=%s | error=%s',
+                            stream_key,
+                            exc,
+                        )
             logger.info(
                 'AssemblyAI session began | stream_key=%s | session_id=%s',
                 stream_key,
                 payload.get('id'),
+            )
+            return
+        if msg_type == 'Error':
+            ASSEMBLYAI_ERRORS_TOTAL.inc()
+            session = self._get_session(stream_key)
+            if session is not None:
+                self._mark_closed(session)
+            logger.error(
+                'AssemblyAI session error | stream_key=%s | payload=%s',
+                stream_key,
+                payload,
             )
             return
         if msg_type == 'Termination':
@@ -411,6 +472,14 @@ class AssemblyAiStreamingProvider:
             partial_meta['turn_start_ms'] = turn_start_ms
             words = payload.get('words')
             partial_meta['transcript_confidence'] = self._confidence_from_words(words)
+            aggregated = session.label_buffer.aggregate(
+                turn_start_ms,
+                int(session.last_audio_timestamp_ms or turn_start_ms or now_ms),
+            )
+            if aggregated != 'unknown':
+                partial_meta['acoustic_class'] = aggregated
+            elif not partial_meta.get('acoustic_class'):
+                partial_meta['acoustic_class'] = session.label_buffer.current_class()
 
         self._partial_coordinator.handle_partial(
             stream_key,
@@ -443,6 +512,11 @@ class AssemblyAiStreamingProvider:
                 or int(time.time() * 1000),
             )
             wall_end_ms = session.last_audio_wall_ms
+            acoustic_extra = self._build_acoustic_extra(
+                session,
+                window_start_ms,
+                window_end_ms,
+            )
             session.current_turn_pcm.clear()
             session.current_turn_start_ms = None
 
@@ -520,6 +594,7 @@ class AssemblyAiStreamingProvider:
             'assemblyai_end_of_turn_confidence': payload.get(
                 'end_of_turn_confidence',
             ),
+            **acoustic_extra,
         }
         self._callback_executor.submit(
             self._on_final_transcript,
@@ -561,17 +636,46 @@ class AssemblyAiStreamingProvider:
         session = self._get_session(stream_key)
         if session is None:
             return
-        if session.reconnects >= self._config.reconnect_limit:
+        pending = b''
+        with session.lock:
+            pending = bytes(session.pending_send_pcm)
+            session.pending_send_pcm.clear()
+        attempt = self._reconnect_counts.get(stream_key, 0) + 1
+        if attempt > self._config.reconnect_limit:
             raise RuntimeError(
                 f'AssemblyAI reconnect limit exceeded for {stream_key}',
             )
-        session.reconnects += 1
+        self._reconnect_counts[stream_key] = attempt
         ASSEMBLYAI_RECONNECTS_TOTAL.inc()
         self.end_stream(stream_key)
+        backoff = min(
+            5.0,
+            self._config.reconnect_backoff_seconds * (2 ** (attempt - 1)),
+        )
+        logger.info(
+            'AssemblyAI reconnect scheduled | stream_key=%s | attempt=%s | '
+            'backoff_s=%.1f | pending_bytes=%s',
+            stream_key,
+            attempt,
+            backoff,
+            len(pending),
+        )
+        time.sleep(backoff)
         self.start_stream(stream_key, meta)
+        if pending:
+            session = self._get_or_start_session(stream_key, meta)
+            with session.lock:
+                session.pending_send_pcm.extend(pending)
+                turn_bytes = len(session.current_turn_pcm)
+            self._flush_send_buffer(
+                session,
+                is_turn_start=False,
+                turn_bytes=turn_bytes,
+            )
 
     def _terminate_session(self, session: _AssemblyAiSession) -> None:
         try:
+            self._flush_send_buffer(session, force=True)
             if session.open_event.is_set() and not session.closed:
                 session.ws_app.send(json.dumps({'type': 'Terminate'}))
                 session.termination_event.wait(
@@ -623,10 +727,148 @@ class AssemblyAiStreamingProvider:
         with self._lock:
             return self._sessions.get(stream_key)
 
+    @staticmethod
+    def _merge_acoustic_meta(
+        session: _AssemblyAiSession,
+        meta: dict[str, object],
+        timestamp_ms: int,
+    ) -> None:
+        """Keep session.meta acoustic fields fresh and record turn labels."""
+        for key in (
+            'acoustic_class',
+            'matched_seller_id',
+            'correlation_confidence',
+            'seller_room_id',
+            'participant_role',
+            'tenant_id',
+            'meeting_id',
+            'participant_id',
+            'track',
+        ):
+            if key in meta and meta[key] not in (None, ''):
+                session.meta[key] = meta[key]
+
+        acoustic_class = str(meta.get('acoustic_class') or '').strip().lower()
+        if acoustic_class not in {'seller', 'customer', 'unknown'}:
+            return
+        duration_hint = 200
+        window_start = int(
+            meta.get('window_start_ms')
+            or max(0, timestamp_ms - duration_hint),
+        )
+        window_end = int(meta.get('window_end_ms') or timestamp_ms)
+        session.label_seq += 1
+        label = AcousticWindowLabel(
+            label_id=session.label_seq,
+            acoustic_class=acoustic_class,  # type: ignore[arg-type]
+            matched_seller_id=(
+                str(meta['matched_seller_id'])
+                if meta.get('matched_seller_id')
+                else None
+            ),
+            confidence=float(meta.get('correlation_confidence') or 0.0),
+            lag_ms=int(meta.get('correlation_lag_ms') or 0),
+            window_start_ms=window_start,
+            window_end_ms=max(window_end, window_start + 1),
+        )
+        session.label_buffer.upsert(label)
+
+    @staticmethod
+    def _build_acoustic_extra(
+        session: _AssemblyAiSession,
+        window_start_ms: int,
+        window_end_ms: int,
+    ) -> dict[str, object]:
+        aggregated = session.label_buffer.aggregate(window_start_ms, window_end_ms)
+        if aggregated == 'unknown':
+            current = session.label_buffer.current_class()
+            # Prefer last scalar from meta when buffer has no overlap.
+            scalar = str(session.meta.get('acoustic_class') or '').strip().lower()
+            if scalar in {'seller', 'customer', 'unknown'}:
+                aggregated = scalar  # type: ignore[assignment]
+            elif current != 'unknown':
+                aggregated = current
+        out: dict[str, object] = {
+            'acoustic_class': aggregated,
+            'seller_room_id': session.meta.get('seller_room_id') or '',
+            'matched_seller_id': session.meta.get('matched_seller_id') or '',
+            'correlation_confidence': float(
+                session.meta.get('correlation_confidence') or 0.0,
+            ),
+        }
+        return out
+
     def _reset_turn_audio(self, session: _AssemblyAiSession) -> None:
         with session.lock:
             session.current_turn_pcm.clear()
             session.current_turn_start_ms = None
+
+    @staticmethod
+    def _send_byte_limits(sample_rate: int, channels: int) -> tuple[int, int]:
+        bytes_per_ms = sample_rate * max(channels, 1) * 2 / 1000.0
+        min_bytes = max(1, int(bytes_per_ms * _MIN_SEND_MS))
+        max_bytes = max(min_bytes, int(bytes_per_ms * _MAX_SEND_MS))
+        return min_bytes, max_bytes
+
+    def _flush_send_buffer(
+        self,
+        session: _AssemblyAiSession,
+        *,
+        force: bool = False,
+        is_turn_start: bool = False,
+        turn_bytes: int = 0,
+    ) -> None:
+        min_bytes, max_bytes = self._send_byte_limits(
+            session.sample_rate,
+            session.channels,
+        )
+        frames: list[bytes] = []
+        with session.lock:
+            if force and 0 < len(session.pending_send_pcm) < min_bytes:
+                pad = min_bytes - len(session.pending_send_pcm)
+                session.pending_send_pcm.extend(b'\x00' * pad)
+            while len(session.pending_send_pcm) >= min_bytes:
+                pending_len = len(session.pending_send_pcm)
+                chunk_len = min(pending_len, max_bytes)
+                remainder = pending_len - chunk_len
+                if (
+                    remainder > 0
+                    and remainder < min_bytes
+                    and pending_len <= max_bytes
+                ):
+                    chunk_len = pending_len
+                frames.append(bytes(session.pending_send_pcm[:chunk_len]))
+                del session.pending_send_pcm[:chunk_len]
+
+        for index, frame in enumerate(frames):
+            self._send_pcm_frame(
+                session,
+                frame,
+                is_turn_start=is_turn_start and index == 0,
+                turn_bytes=turn_bytes,
+            )
+
+    def _send_pcm_frame(
+        self,
+        session: _AssemblyAiSession,
+        pcm_data: bytes,
+        *,
+        is_turn_start: bool,
+        turn_bytes: int,
+    ) -> None:
+        if session.closed:
+            raise RuntimeError(
+                f'AssemblyAI stream is closed for {session.stream_key}',
+            )
+        note_assemblyai_audio_sent(
+            logger,
+            session.stream_key,
+            chunk_bytes=len(pcm_data),
+            turn_bytes=turn_bytes,
+            is_turn_start=is_turn_start,
+        )
+        session.ws_app.send(pcm_data, opcode=self._binary_opcode())
+        ASSEMBLYAI_AUDIO_BYTES_SENT_TOTAL.inc(len(pcm_data))
 
     @staticmethod
     def _extract_pcm(audio_data: bytes) -> bytes:

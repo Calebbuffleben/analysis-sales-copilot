@@ -40,6 +40,16 @@ class _FakeWebSocketApp:
 
     def run_forever(self) -> None:
         self.on_open(self)
+        self.on_message(
+            self,
+            json.dumps(
+                {
+                    'type': 'Begin',
+                    'id': 'test-session',
+                    'expires_at': 9_999_999_999,
+                },
+            ),
+        )
 
     def send(self, payload: Any, opcode: Any = None) -> None:
         self.sent.append((payload, opcode))
@@ -221,6 +231,7 @@ def test_tab_audio_url_uses_tuned_vad(monkeypatch: Any) -> None:
             max_turn_silence_ms=2400,
             tab_audio_vad_threshold=0.65,
             tab_audio_max_turn_silence_ms=800,
+            continuous_partials=True,
         ),
         lambda *_args: None,
     )
@@ -233,6 +244,8 @@ def test_tab_audio_url_uses_tuned_vad(monkeypatch: Any) -> None:
     )
     assert 'vad_threshold=0.65' in url
     assert 'max_turn_silence=800' in url
+    assert 'enable_partial_transcripts=true' in url
+    assert 'continuous_partials' not in url
 
     mic_url = provider._build_url(
         16000,
@@ -240,6 +253,78 @@ def test_tab_audio_url_uses_tuned_vad(monkeypatch: Any) -> None:
     )
     assert 'vad_threshold=0.5' in mic_url
     assert 'max_turn_silence=2400' in mic_url
+    assert 'enable_partial_transcripts=true' in mic_url
+    provider.close_all()
+
+
+def test_small_chunks_are_buffered_before_send(monkeypatch: Any) -> None:
+    _install_fake_websocket(monkeypatch)
+    provider = AssemblyAiStreamingProvider(
+        AssemblyAiStreamConfig(
+            api_key='test-key',
+            connect_timeout_seconds=0.2,
+            termination_timeout_seconds=0.0,
+        ),
+        lambda *_args: None,
+    )
+    meta = {
+        'meeting_id': 'meet-1',
+        'participant_id': 'seller',
+        'track': 'mic',
+        'sample_rate': 16000,
+        'channels': 1,
+        'timestamp_ms': 10_000,
+        'tenant_id': 'tenant-1',
+    }
+    small_chunk = b'\x01\x00' * 640  # 40ms — below AssemblyAI minimum
+    provider.send_audio('meet-1:seller:mic', small_chunk, meta)
+    fake_ws = _FakeWebSocketApp.instances[0]
+    assert fake_ws.sent == []
+
+    provider.send_audio('meet-1:seller:mic', small_chunk, meta)
+    binary_sends = [
+        payload for payload, _opcode in fake_ws.sent if isinstance(payload, (bytes, bytearray))
+    ]
+    assert len(binary_sends) == 1
+    assert len(binary_sends[0]) >= 1600
+    provider.close_all()
+
+
+def test_continuous_partials_sent_after_begin(monkeypatch: Any) -> None:
+    _install_fake_websocket(monkeypatch)
+    provider = AssemblyAiStreamingProvider(
+        AssemblyAiStreamConfig(
+            api_key='test-key',
+            connect_timeout_seconds=0.2,
+            termination_timeout_seconds=0.0,
+            continuous_partials=True,
+        ),
+        lambda *_args: None,
+    )
+    provider.send_audio(
+        'meet-1:seller:mic',
+        b'\x01\x00' * 1600,
+        {
+            'meeting_id': 'meet-1',
+            'participant_id': 'seller',
+            'track': 'mic',
+            'sample_rate': 16000,
+            'channels': 1,
+            'timestamp_ms': 10_000,
+            'tenant_id': 'tenant-1',
+        },
+    )
+    fake_ws = _FakeWebSocketApp.instances[0]
+    update_messages = [
+        json.loads(payload)
+        for payload, _opcode in fake_ws.sent
+        if isinstance(payload, str)
+    ]
+    assert any(
+        message.get('type') == 'UpdateConfiguration'
+        and message.get('continuous_partials') is True
+        for message in update_messages
+    )
     provider.close_all()
 
 
