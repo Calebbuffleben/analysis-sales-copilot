@@ -447,3 +447,98 @@ ACOUSTIC_ROUTING_SKIPPED_TOTAL = _metric_or_noop(
     ['reason'],
 )
 
+
+
+# --- Gemini Live (realtime) metrics ---
+
+LIVE_SESSIONS_OPEN = _metric_or_noop(
+    Gauge,
+    'live_sessions_open',
+    'Current open Gemini Live sessions.',
+)
+
+LIVE_SESSIONS_STARTED_TOTAL = _metric_or_noop(
+    Counter,
+    'live_sessions_started_total',
+    'Total Gemini Live sessions started.',
+)
+
+LIVE_SESSIONS_CLOSED_TOTAL = _metric_or_noop(
+    Counter,
+    'live_sessions_closed_total',
+    'Total Gemini Live sessions closed.',
+)
+
+LIVE_SESSIONS_RESUMED_TOTAL = _metric_or_noop(
+    Counter,
+    'live_sessions_resumed_total',
+    'Total Gemini Live session resumptions.',
+)
+
+LIVE_AUDIO_BYTES_SENT_TOTAL = _metric_or_noop(
+    Counter,
+    'live_audio_bytes_sent_total',
+    'Total PCM audio bytes sent to Gemini Live.',
+)
+
+LIVE_TOOL_CALLS_TOTAL = _metric_or_noop(
+    Counter,
+    'live_tool_calls_total',
+    'Total emit_feedback tool calls received from Gemini Live.',
+)
+
+LIVE_TOOL_CALLS_INVALID_TOTAL = _metric_or_noop(
+    Counter,
+    'live_tool_calls_invalid_total',
+    'Total emit_feedback tool calls rejected by validation.',
+)
+
+LIVE_TOOL_CALLS_DEDUPED_TOTAL = _metric_or_noop(
+    Counter,
+    'live_tool_calls_deduped_total',
+    'Total emit_feedback tool calls dropped by turnId dedupe.',
+)
+
+LIVE_UNEXPECTED_AUDIO_BYTES_TOTAL = _metric_or_noop(
+    Counter,
+    'live_unexpected_audio_bytes_total',
+    'Total unexpected audio output bytes discarded from Gemini Live.',
+)
+
+LIVE_VAD_END_TO_TOOL_CALL_MS = _metric_or_noop(
+    Histogram,
+    'live_vad_end_to_tool_call_ms',
+    'Wall time from speech end (activity_end) to emit_feedback tool call (ms).',
+    buckets=(50, 100, 200, 400, 600, 850, 1000, 1500, 3000, 5000),
+)
+
+LIVE_SPEECH_END_TO_WS_MS = _metric_or_noop(
+    Histogram,
+    'live_speech_end_to_ws_ms',
+    'Wall time from speech end to WS broadcast enqueue (ms).',
+    buckets=(50, 100, 200, 400, 600, 850, 1000, 1500, 3000, 5000),
+)
+
+LIVE_COST_USD_TOTAL = _metric_or_noop(
+    Counter,
+    'live_cost_usd_total',
+    'Estimated Gemini Live cost in USD (token-based).',
+)
+
+LIVE_COST_USD_PER_MEETING = _metric_or_noop(
+    Gauge,
+    'live_cost_usd_per_meeting',
+    'Estimated Gemini Live cost in USD for the most recently updated meeting.',
+)
+
+LIVE_COST_LIMIT_TRIPS_TOTAL = _metric_or_noop(
+    Counter,
+    'live_cost_limit_trips_total',
+    'Total times a Live session hit the per-meeting cost guardrail.',
+)
+
+LIVE_FALLBACK_TOTAL = _metric_or_noop(
+    Counter,
+    'live_fallback_total',
+    'Total times Live path fell back to generateContent multimodal.',
+)

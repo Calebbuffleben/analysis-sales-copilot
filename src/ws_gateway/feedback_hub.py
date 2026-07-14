@@ -79,6 +79,7 @@ class FeedbackHub:
         if not connections:
             return False
 
+        started = time.perf_counter()
         payload = self._build_payload(event, direct_feedback)
         try:
             text = json.dumps(payload, ensure_ascii=False)
@@ -91,13 +92,21 @@ class FeedbackHub:
                 self._safe_send(connection, text),
                 loop,
             )
+        broadcast_ms = (time.perf_counter() - started) * 1000.0
+        speech_end = event.speech_end_ms or event.window_end_ms
+        speech_to_ws = max(0, int(time.time() * 1000) - int(speech_end or 0))
         logger.info(
             '⚡ ws feedback broadcast | tenantId=%s | meetingId=%s | subscribers=%s | '
-            'feedbackType=%s',
+            'feedbackType=%s | turnId=%s | speechEndToWsMs=%s | broadcastSchedMs=%.1f | '
+            'traceId=%s',
             event.tenant_id,
             event.meeting_id,
             len(connections),
             event.analysis.feedback_type,
+            event.turn_id or '',
+            speech_to_ws,
+            broadcast_ms,
+            event.feedback_trace_id or '',
         )
         return True
 
@@ -126,6 +135,14 @@ class FeedbackHub:
             metadata['feedbackType'] = analysis.feedback_type
         if (analysis.playbook_hint_json or '').strip():
             metadata['playbookHintJson'] = analysis.playbook_hint_json
+        if event.turn_id:
+            metadata['turnId'] = event.turn_id
+        speech_end = event.speech_end_ms or event.window_end_ms
+        if speech_end:
+            metadata['speechEndMs'] = int(speech_end)
+            metadata['speechAnchorMs'] = int(speech_end)
+        if event.feedback_trace_id:
+            metadata['feedbackTraceId'] = event.feedback_trace_id
 
         return {
             'type': 'feedback',

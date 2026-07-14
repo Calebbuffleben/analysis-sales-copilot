@@ -6,7 +6,7 @@ import io
 import logging
 import time
 import wave
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ...feedback_trace import log_feedback_trace, make_feedback_trace_id
 from ...pipeline_latency import LatencyTraceContext, log_speech_to_publish_ms
@@ -144,6 +144,7 @@ class TranscriptionPipelineService:
         acoustic_routing_enabled: bool = True,
         acoustic_shadow_mode: bool = False,
         multimodal_audio_enabled: bool = False,
+        live_host_context_fn: Optional[Callable[[str, str], None]] = None,
     ) -> None:
         self._transcription_service = transcription_service
         self._text_analysis_service = text_analysis_service
@@ -156,6 +157,7 @@ class TranscriptionPipelineService:
         self._acoustic_routing_enabled = acoustic_routing_enabled
         self._acoustic_shadow_mode = acoustic_shadow_mode
         self._multimodal_audio_enabled = multimodal_audio_enabled
+        self._live_host_context_fn = live_host_context_fn
 
 
     def _on_window_ready(
@@ -390,6 +392,18 @@ class TranscriptionPipelineService:
                 chunk,
                 wav_bytes,
             )
+            if self._live_host_context_fn is not None:
+                summary = (
+                    f'estado={analysis.conversation_state_json[:500]} '
+                    f'evidence={evidence[:200]}'
+                )
+                try:
+                    self._live_host_context_fn(chunk.meeting_id, summary)
+                except Exception:
+                    logger.exception(
+                        'Live host context inject failed | meeting=%s',
+                        chunk.meeting_id,
+                    )
         else:
             analysis, evidence = self._text_analysis_service.analyze_audio(
                 chunk,

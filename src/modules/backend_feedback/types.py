@@ -28,3 +28,7 @@ class BackendFeedbackEvent:
     transcript_confidence: float
     analysis: TextAnalysisResult
     tenant_id: str = ''
+    # Live-path correlation (optional; ignored by unary multimodal).
+    turn_id: str = ''
+    speech_end_ms: int | None = None
+    feedback_trace_id: str = ''

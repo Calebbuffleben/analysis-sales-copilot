@@ -23,6 +23,8 @@ from ..modules.backend_feedback.grpc_feedback_client import BackendFeedbackClien
 from ..modules.backend_feedback.publish_dispatcher import PublishDispatcher
 from ..modules.backend_feedback.service_jwt_provider import ServiceJwtProvider
 from ..modules.text_analysis.text_analysis_service import TextAnalysisService
+from ..modules.text_analysis.gemini_live_session import GeminiLiveManager
+from ..modules.text_analysis.live_feedback_publisher import LiveFeedbackPublisher
 from ..feedback_trace import make_feedback_trace_id
 from ..modules.transcription.assemblyai_streaming_provider import (
     AssemblyAiStreamConfig,
@@ -59,6 +61,7 @@ class _ServerRuntime:
         transcription_service: Optional[TranscriptionService] = None,
         streaming_stt_provider: Optional[AssemblyAiStreamingProvider] = None,
         desktop_ws_gateway: Optional[DesktopWsGateway] = None,
+        live_manager: Optional[GeminiLiveManager] = None,
     ) -> None:
         self.text_analysis_service = text_analysis_service
         self.publish_dispatcher = publish_dispatcher
@@ -66,12 +69,19 @@ class _ServerRuntime:
         self.transcription_service = transcription_service
         self.streaming_stt_provider = streaming_stt_provider
         self.desktop_ws_gateway = desktop_ws_gateway
+        self.live_manager = live_manager
         self._closed = False
 
     def shutdown(self) -> None:
         if self._closed:
             return
         self._closed = True
+
+        try:
+            if self.live_manager is not None:
+                self.live_manager.stop()
+        except Exception:
+            logger.exception('Failed to stop Gemini Live manager')
 
         try:
             if self.desktop_ws_gateway is not None:
@@ -216,7 +226,8 @@ def create_server(config: Settings) -> grpc.Server:
     )
 
     # Create services
-    multimodal_audio = config.audio_analysis_mode == 'multimodal'
+    live_audio = config.audio_analysis_mode == 'live'
+    multimodal_audio = config.audio_analysis_mode in {'multimodal', 'live'}
     sliding_window_worker = SlidingWindowWorker(
         min_window_seconds=config.audio_buffer_min_window_seconds,
         min_interval_ms=(
@@ -309,6 +320,7 @@ def create_server(config: Settings) -> grpc.Server:
         acoustic_routing_enabled=config.acoustic_routing_enabled,
         acoustic_shadow_mode=config.acoustic_shadow_mode,
         multimodal_audio_enabled=multimodal_audio,
+        live_host_context_fn=None,
     )
     partial_coordinator: PartialTurnCoordinator | None = None
     if (
@@ -449,6 +461,28 @@ def create_server(config: Settings) -> grpc.Server:
         streaming_stt_provider=streaming_stt_provider,
     )
 
+    live_manager: GeminiLiveManager | None = None
+    if live_audio:
+        keys = config.effective_gemini_api_keys()
+        live_key = keys[0] if keys else ''
+        live_publisher = LiveFeedbackPublisher(publish_dispatcher)
+        live_manager = GeminiLiveManager(
+            api_key=live_key,
+            model_name=config.live_model,
+            publisher=live_publisher,
+            max_cost_usd_per_meeting=config.live_max_cost_usd_per_meeting,
+            alert_cost_usd=config.live_alert_cost_usd,
+            max_concurrent_sessions=config.live_max_concurrent_sessions,
+            silence_duration_ms=config.live_silence_duration_ms,
+            context_window_tokens=config.live_context_window_tokens,
+            session_rotation_minutes=config.live_session_rotation_minutes,
+        )
+        live_manager.start()
+        audio_service.live_manager = live_manager
+        transcription_pipeline_service._live_host_context_fn = (
+            live_manager.inject_host_context
+        )
+
     desktop_ws_gateway: DesktopWsGateway | None = None
     if config.desktop_ws_enabled and feedback_hub is not None:
         authenticator = DesktopWsAuthenticator(
@@ -476,7 +510,16 @@ def create_server(config: Settings) -> grpc.Server:
     )
 
     logger.info(f"Servidor gRPC criado com {config.grpc_workers} workers")
-    if multimodal_audio:
+    if live_audio:
+        logger.info(
+            'Audio analysis | mode=live | live_model=%s | silence_ms=%s | '
+            'max_cost_usd=%s | rotation_min=%s | fallback=multimodal_windows',
+            config.live_model,
+            config.live_silence_duration_ms,
+            config.live_max_cost_usd_per_meeting,
+            config.live_session_rotation_minutes,
+        )
+    elif config.audio_analysis_mode == 'multimodal':
         logger.info(
             'Audio analysis | mode=multimodal | model=%s | client_interval_ms=%s | '
             'host_interval_ms=%s | overlap_ms=%s',
@@ -561,6 +604,8 @@ def create_server(config: Settings) -> grpc.Server:
     if config.preload_ml_models and transcription_service is not None:
         logger.info('PRELOAD_ML_MODELS=true — loading Whisper + embedding model...')
         _warmup_ml_models(transcription_service, text_analysis_service)
+    elif live_audio:
+        logger.info('AUDIO_ANALYSIS_MODE=live — skipping all STT model preload')
     elif multimodal_audio:
         logger.info('AUDIO_ANALYSIS_MODE=multimodal — skipping all STT model preload')
     elif config.stt_provider == 'assemblyai':
@@ -579,6 +624,7 @@ def create_server(config: Settings) -> grpc.Server:
             transcription_service=transcription_service,
             streaming_stt_provider=streaming_stt_provider,
             desktop_ws_gateway=desktop_ws_gateway,
+            live_manager=live_manager,
         ),
     )
     return server

@@ -17,6 +17,7 @@ COPY proto/ ./proto/
 COPY src/ ./src/
 # Smoke test script (same as host: python test_gemini_verify.py)
 COPY test_gemini_verify.py .
+COPY test_gemini_live_spike.py .
 
 # Gerar código gRPC a partir do .proto
 RUN python -m grpc_tools.protoc \

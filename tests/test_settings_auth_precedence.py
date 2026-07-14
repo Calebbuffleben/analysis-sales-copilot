@@ -135,6 +135,12 @@ def test_gemini_validate_accepts_keys_without_format_prefix_check() -> None:
     settings.validate()
 
 
+def test_gemini_api_keys_strips_wrapping_quotes(monkeypatch) -> None:
+    monkeypatch.setenv('GEMINI_API_KEYS', '"key-a,key-b"')
+    settings = Settings.from_env()
+    assert settings.gemini_api_keys == ('key-a', 'key-b')
+
+
 def test_gemini_api_keys_rejects_empty_entries(monkeypatch) -> None:
     monkeypatch.setenv('GEMINI_API_KEYS', 'key-a,,key-b')
 

@@ -38,11 +38,20 @@ class Settings:
     # the legacy faster-whisper path available during rollout.
     stt_provider: str = 'local'
     # `multimodal` sends bounded PCM windows directly to Gemini. `transcript`
-    # preserves AssemblyAI/local STT as a rollback path.
+    # preserves AssemblyAI/local STT as a rollback path. `live` uses Gemini Live
+    # for client audio (sub-second best-effort) with multimodal as degraded fallback.
     audio_analysis_mode: str = 'transcript'
     audio_analysis_client_interval_ms: int = 7000
     audio_analysis_host_interval_ms: int = 20000
     audio_analysis_overlap_ms: int = 750
+    # Gemini Live guardrails / tuning
+    live_model: str = 'gemini-3.1-flash-live-preview'
+    live_silence_duration_ms: int = 250
+    live_max_cost_usd_per_meeting: float = 3.0
+    live_alert_cost_usd: float = 1.0
+    live_max_concurrent_sessions: int = 20
+    live_context_window_tokens: int = 12_000
+    live_session_rotation_minutes: float = 2.0
     assemblyai_api_key: Optional[str] = None
     assemblyai_api_host: str = 'streaming.assemblyai.com'
     assemblyai_speech_model: str = 'u3-rt-pro'
@@ -213,6 +222,29 @@ class Settings:
             audio_analysis_overlap_ms=int(
                 os.getenv('AUDIO_ANALYSIS_OVERLAP_MS', '750'),
             ),
+            live_model=os.getenv(
+                'LIVE_MODEL',
+                'gemini-3.1-flash-live-preview',
+            ).strip()
+            or 'gemini-3.1-flash-live-preview',
+            live_silence_duration_ms=int(
+                os.getenv('LIVE_SILENCE_DURATION_MS', '250'),
+            ),
+            live_max_cost_usd_per_meeting=float(
+                os.getenv('LIVE_MAX_COST_USD_PER_MEETING', '3.0'),
+            ),
+            live_alert_cost_usd=float(
+                os.getenv('LIVE_ALERT_COST_USD', '1.0'),
+            ),
+            live_max_concurrent_sessions=int(
+                os.getenv('LIVE_MAX_CONCURRENT_SESSIONS', '20'),
+            ),
+            live_context_window_tokens=int(
+                os.getenv('LIVE_CONTEXT_WINDOW_TOKENS', '12000'),
+            ),
+            live_session_rotation_minutes=float(
+                os.getenv('LIVE_SESSION_ROTATION_MINUTES', '2.0'),
+            ),
             assemblyai_api_key=(os.getenv('ASSEMBLYAI_API_KEY') or '').strip() or None,
             assemblyai_api_host=os.getenv(
                 'ASSEMBLYAI_API_HOST',
@@ -337,7 +369,10 @@ class Settings:
             ollama_base_url=os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434'),
             ollama_model=os.getenv('OLLAMA_MODEL', 'llama3.1:8b'),
             ollama_timeout=int(os.getenv('OLLAMA_TIMEOUT', '30')),
-            gemini_api_key=(os.getenv('GEMINI_API_KEY') or '').strip() or None,
+            gemini_api_key=(
+                (os.getenv('GEMINI_API_KEY') or '').strip().strip('"').strip("'")
+                or None
+            ),
             gemini_api_keys=cls._parse_csv(os.getenv('GEMINI_API_KEYS')),
             gemini_model=os.getenv('GEMINI_MODEL', 'gemini-2.5-flash'),
             gemini_rpm_limit=int(os.getenv('GEMINI_RPM_LIMIT', '12')),
@@ -380,7 +415,14 @@ class Settings:
     def _parse_csv(raw: Optional[str]) -> tuple[str, ...]:
         if raw is None or not raw.strip():
             return ()
-        parts = [part.strip() for part in raw.split(',')]
+        cleaned = raw.strip()
+        if (
+            len(cleaned) >= 2
+            and cleaned[0] == cleaned[-1]
+            and cleaned[0] in {'"', "'"}
+        ):
+            cleaned = cleaned[1:-1]
+        parts = [part.strip().strip('"').strip("'") for part in cleaned.split(',')]
         if any(not part for part in parts):
             raise ValueError('Gemini API key list contains empty entries.')
         return tuple(parts)
@@ -473,10 +515,10 @@ class Settings:
                 f'Invalid STT_PROVIDER: {self.stt_provider}. '
                 'Expected "assemblyai" or "local".',
             )
-        if self.audio_analysis_mode not in {'transcript', 'multimodal'}:
+        if self.audio_analysis_mode not in {'transcript', 'multimodal', 'live'}:
             raise ValueError(
                 f'Invalid AUDIO_ANALYSIS_MODE: {self.audio_analysis_mode}. '
-                'Expected "transcript" or "multimodal".',
+                'Expected "transcript", "multimodal", or "live".',
             )
         if self.audio_analysis_client_interval_ms < 1000:
             raise ValueError('AUDIO_ANALYSIS_CLIENT_INTERVAL_MS must be >= 1000.')
@@ -484,8 +526,23 @@ class Settings:
             raise ValueError('AUDIO_ANALYSIS_HOST_INTERVAL_MS must be >= 1000.')
         if self.audio_analysis_overlap_ms < 0:
             raise ValueError('AUDIO_ANALYSIS_OVERLAP_MS must be >= 0.')
-        if self.audio_analysis_mode == 'multimodal' and self.llm_provider != 'gemini':
-            raise ValueError('AUDIO_ANALYSIS_MODE=multimodal requires LLM_PROVIDER=gemini.')
+        if self.audio_analysis_mode in {'multimodal', 'live'} and self.llm_provider != 'gemini':
+            raise ValueError(
+                f'AUDIO_ANALYSIS_MODE={self.audio_analysis_mode} requires LLM_PROVIDER=gemini.',
+            )
+        if self.audio_analysis_mode == 'live':
+            if self.live_silence_duration_ms < 50:
+                raise ValueError('LIVE_SILENCE_DURATION_MS must be >= 50.')
+            if self.live_max_cost_usd_per_meeting <= 0:
+                raise ValueError('LIVE_MAX_COST_USD_PER_MEETING must be > 0.')
+            if self.live_alert_cost_usd < 0:
+                raise ValueError('LIVE_ALERT_COST_USD must be >= 0.')
+            if self.live_max_concurrent_sessions < 1:
+                raise ValueError('LIVE_MAX_CONCURRENT_SESSIONS must be >= 1.')
+            if self.live_context_window_tokens < 1000:
+                raise ValueError('LIVE_CONTEXT_WINDOW_TOKENS must be >= 1000.')
+            if self.live_session_rotation_minutes <= 0:
+                raise ValueError('LIVE_SESSION_ROTATION_MINUTES must be > 0.')
         if self.audio_analysis_mode == 'transcript' and self.stt_provider == 'assemblyai':
             if not (self.assemblyai_api_key or '').strip():
                 raise ValueError(
