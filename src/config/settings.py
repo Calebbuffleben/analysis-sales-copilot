@@ -37,6 +37,12 @@ class Settings:
     # STT provider: `assemblyai` is the streaming cloud provider; `local` keeps
     # the legacy faster-whisper path available during rollout.
     stt_provider: str = 'local'
+    # `multimodal` sends bounded PCM windows directly to Gemini. `transcript`
+    # preserves AssemblyAI/local STT as a rollback path.
+    audio_analysis_mode: str = 'transcript'
+    audio_analysis_client_interval_ms: int = 7000
+    audio_analysis_host_interval_ms: int = 20000
+    audio_analysis_overlap_ms: int = 750
     assemblyai_api_key: Optional[str] = None
     assemblyai_api_host: str = 'streaming.assemblyai.com'
     assemblyai_speech_model: str = 'u3-rt-pro'
@@ -194,6 +200,19 @@ class Settings:
                 os.getenv('WHISPER_DEFAULT_LANGUAGE'),
             ),
             stt_provider=os.getenv('STT_PROVIDER', 'assemblyai').strip().lower(),
+            audio_analysis_mode=os.getenv(
+                'AUDIO_ANALYSIS_MODE',
+                'transcript',
+            ).strip().lower(),
+            audio_analysis_client_interval_ms=int(
+                os.getenv('AUDIO_ANALYSIS_CLIENT_INTERVAL_MS', '7000'),
+            ),
+            audio_analysis_host_interval_ms=int(
+                os.getenv('AUDIO_ANALYSIS_HOST_INTERVAL_MS', '20000'),
+            ),
+            audio_analysis_overlap_ms=int(
+                os.getenv('AUDIO_ANALYSIS_OVERLAP_MS', '750'),
+            ),
             assemblyai_api_key=(os.getenv('ASSEMBLYAI_API_KEY') or '').strip() or None,
             assemblyai_api_host=os.getenv(
                 'ASSEMBLYAI_API_HOST',
@@ -454,7 +473,20 @@ class Settings:
                 f'Invalid STT_PROVIDER: {self.stt_provider}. '
                 'Expected "assemblyai" or "local".',
             )
-        if self.stt_provider == 'assemblyai':
+        if self.audio_analysis_mode not in {'transcript', 'multimodal'}:
+            raise ValueError(
+                f'Invalid AUDIO_ANALYSIS_MODE: {self.audio_analysis_mode}. '
+                'Expected "transcript" or "multimodal".',
+            )
+        if self.audio_analysis_client_interval_ms < 1000:
+            raise ValueError('AUDIO_ANALYSIS_CLIENT_INTERVAL_MS must be >= 1000.')
+        if self.audio_analysis_host_interval_ms < 1000:
+            raise ValueError('AUDIO_ANALYSIS_HOST_INTERVAL_MS must be >= 1000.')
+        if self.audio_analysis_overlap_ms < 0:
+            raise ValueError('AUDIO_ANALYSIS_OVERLAP_MS must be >= 0.')
+        if self.audio_analysis_mode == 'multimodal' and self.llm_provider != 'gemini':
+            raise ValueError('AUDIO_ANALYSIS_MODE=multimodal requires LLM_PROVIDER=gemini.')
+        if self.audio_analysis_mode == 'transcript' and self.stt_provider == 'assemblyai':
             if not (self.assemblyai_api_key or '').strip():
                 raise ValueError(
                     'STT_PROVIDER=assemblyai requires ASSEMBLYAI_API_KEY.',

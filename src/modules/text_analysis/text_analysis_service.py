@@ -40,6 +40,9 @@ from ...metrics.realtime_metrics import (
     LLM_CACHE_HIT_RATIO,
     LLM_RATE_LIMITED_TOTAL,
     LLM_RATE_QUEUE_SIZE,
+    AUDIO_LLM_CALLS_TOTAL,
+    AUDIO_LLM_ERRORS_TOTAL,
+    AUDIO_LLM_LATENCY_MS,
 )
 
 logger = logging.getLogger(__name__)
@@ -565,8 +568,9 @@ class TextAnalysisService:
         raw_next = analysis_result.get('conversation_state')
         if not isinstance(raw_next, dict):
             raw_next = {}
-        new_state = _merge_conversation_state(current_state, raw_next)
         with self._lock:
+            latest_state = dict(self._state.get(context_key, current_state))
+            new_state = _merge_conversation_state(latest_state, raw_next)
             self._state[context_key] = new_state.to_dict()
 
         playbook_hint_json = _playbook_hint_for_result_dict(analysis_result)
@@ -598,6 +602,114 @@ class TextAnalysisService:
             logger.debug("Failed to log LLM interaction: %s", log_error)
 
         return result
+
+    def analyze_audio(
+        self,
+        chunk: TranscriptionChunk,
+        wav_bytes: bytes,
+    ) -> tuple[TextAnalysisResult, str]:
+        """Analyze audio directly and return normalized feedback plus evidence."""
+        return self._analyze_audio_window(chunk, wav_bytes, speaker_role='client')
+
+    def observe_audio_context(
+        self,
+        chunk: TranscriptionChunk,
+        wav_bytes: bytes,
+    ) -> tuple[TextAnalysisResult, str]:
+        """Update meeting state from host audio without publishing feedback."""
+        return self._analyze_audio_window(chunk, wav_bytes, speaker_role='host')
+
+    def _analyze_audio_window(
+        self,
+        chunk: TranscriptionChunk,
+        wav_bytes: bytes,
+        *,
+        speaker_role: str,
+    ) -> tuple[TextAnalysisResult, str]:
+        context_key = self._get_context_key(chunk)
+        current_state = self._get_current_state(context_key)
+        analysis_result: Dict[str, Any] = {
+            'direct_feedback': '',
+            'confidence': 0.0,
+            'feedback_type': None,
+            'evidence_text': '',
+            'conversation_state': {},
+            'playbook_template_key': None,
+            'playbook_variables': {},
+        }
+
+        if self._gemini_pool is None:
+            logger.error('Multimodal audio analysis requires the Gemini provider.')
+        else:
+            slot = self._gemini_pool.resolve_slot(chunk.tenant_id)
+            if not slot.try_acquire():
+                LLM_RATE_LIMITED_TOTAL.inc()
+                logger.warning(
+                    'Dropping audio analysis at Gemini RPM limit | meeting=%s | role=%s',
+                    chunk.meeting_id,
+                    speaker_role,
+                )
+            else:
+                LLM_CALLS_TOTAL.inc()
+                AUDIO_LLM_CALLS_TOTAL.inc()
+                started_ms = time.time() * 1000
+                for candidate in self._gemini_pool.resolve_slots_ordered(chunk.tenant_id):
+                    if candidate is not slot and not candidate.try_acquire():
+                        continue
+                    try:
+                        analysis_result = candidate.analyzer.analyze_audio(
+                            wav_bytes,
+                            current_state,
+                            speaker_role=speaker_role,
+                            latency_context=self._latency_context_for_chunk(chunk),
+                        )
+                        break
+                    except InvalidGeminiApiKeyError:
+                        continue
+                    except QuotaExhaustedError:
+                        LLM_RATE_LIMITED_TOTAL.inc()
+                        break
+                    except Exception:
+                        LLM_CALL_ERRORS_TOTAL.inc()
+                        AUDIO_LLM_ERRORS_TOTAL.inc()
+                        logger.exception(
+                            'Multimodal audio analysis failed | meeting=%s',
+                            chunk.meeting_id,
+                        )
+                        break
+                duration_ms = time.time() * 1000 - started_ms
+                LLM_CALL_DURATION_MS.observe(duration_ms)
+                AUDIO_LLM_LATENCY_MS.observe(duration_ms)
+
+        confidence = float(analysis_result.get('confidence', 0.0) or 0.0)
+        direct_feedback = str(analysis_result.get('direct_feedback') or '').strip()
+        feedback_type = analysis_result.get('feedback_type')
+        if speaker_role == 'host' or confidence < 0.6:
+            direct_feedback = ''
+            feedback_type = None
+        elif direct_feedback:
+            LLM_FEEDBACK_EMITTED_TOTAL.inc()
+
+        raw_next = analysis_result.get('conversation_state')
+        with self._lock:
+            latest_state = dict(self._state.get(context_key, current_state))
+            new_state = _merge_conversation_state(
+                latest_state,
+                raw_next if isinstance(raw_next, dict) else {},
+            )
+            state_dict = new_state.to_dict()
+            self._state[context_key] = state_dict
+
+        return (
+            TextAnalysisResult(
+                direct_feedback=direct_feedback,
+                confidence=confidence,
+                feedback_type=feedback_type,
+                conversation_state_json=json.dumps(state_dict, ensure_ascii=False),
+                playbook_hint_json=_playbook_hint_for_result_dict(analysis_result),
+            ),
+            str(analysis_result.get('evidence_text') or '').strip(),
+        )
 
     def observe_context(self, chunk: TranscriptionChunk) -> TextAnalysisResult:
         """Update meeting context from host speech without emitting feedback."""
@@ -639,9 +751,10 @@ class TextAnalysisService:
         raw_next = analysis_result.get('conversation_state')
         if not isinstance(raw_next, dict):
             raw_next = {}
-        new_state = _merge_conversation_state(current_state, raw_next)
-        state_dict = new_state.to_dict()
         with self._lock:
+            latest_state = dict(self._state.get(context_key, current_state))
+            new_state = _merge_conversation_state(latest_state, raw_next)
+            state_dict = new_state.to_dict()
             self._state[context_key] = state_dict
 
         logger.info(

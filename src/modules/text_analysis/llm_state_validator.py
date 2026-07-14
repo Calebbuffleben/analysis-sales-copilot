@@ -280,6 +280,11 @@ class LLMAnalysisResult(BaseModel):
         default=None,
         description="Type of feedback: objection, opportunity, rapport, closing, or null"
     )
+    evidence_text: str = Field(
+        default="",
+        max_length=1000,
+        description="Short literal evidence extracted from audio, empty when unavailable",
+    )
     estado: ConversationState = Field(
         default_factory=ConversationState.default_state,
         description="Updated conversation state"
@@ -385,6 +390,7 @@ def validate_llm_response(raw_response: dict) -> LLMAnalysisResult:
             feedback=raw_response.get("feedback"),
             confidence=raw_response.get("confidence", 0.5),
             feedback_type=raw_response.get("feedback_type"),
+            evidence_text=raw_response.get("evidence_text") or "",
             estado=estado,
             playbook_template_key=p_key,
             playbook_variables=p_vars,
@@ -395,6 +401,7 @@ def validate_llm_response(raw_response: dict) -> LLMAnalysisResult:
             feedback="",
             confidence=0.0,
             feedback_type=None,
+            evidence_text="",
             estado=ConversationState.default_state(),
             playbook_template_key=None,
             playbook_variables={},

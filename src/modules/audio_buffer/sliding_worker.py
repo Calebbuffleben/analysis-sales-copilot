@@ -47,11 +47,18 @@ class SlidingWindowWorker:
         window_reader: Optional[WindowDataReader] = None,
         min_window_seconds: float = 4.0,
         min_interval_ms: int = 2000,
+        *,
+        host_min_interval_ms: Optional[int] = None,
+        incremental: bool = False,
+        overlap_ms: int = 0,
     ) -> None:
         self._window_reader = window_reader
         self._window_callback: Optional[WindowReadyCallback] = None
         self._min_window_seconds = min_window_seconds
         self._min_interval_ms = min_interval_ms
+        self._host_min_interval_ms = host_min_interval_ms
+        self._incremental = incremental
+        self._overlap_ms = max(0, overlap_ms)
         self._last_emitted_at_ms: Dict[str, int] = {}
 
     def set_window_reader(self, reader: WindowDataReader) -> None:
@@ -102,18 +109,35 @@ class SlidingWindowWorker:
             return False
 
         last_emitted_at_ms = self._last_emitted_at_ms.get(stream_key)
+        participant_role = str(meta.get('participant_role') or '').strip().lower()
+        min_interval_ms = (
+            self._host_min_interval_ms
+            if participant_role == 'host' and self._host_min_interval_ms is not None
+            else self._min_interval_ms
+        )
         if force and last_emitted_at_ms is not None and window_end_ms <= last_emitted_at_ms:
             return False
 
         if (
             not force
             and last_emitted_at_ms is not None
-            and (timestamp_ms - last_emitted_at_ms) < self._min_interval_ms
+            and (timestamp_ms - last_emitted_at_ms) < min_interval_ms
         ):
             return False
 
+        if self._incremental and last_emitted_at_ms is not None:
+            desired_ms = max(0, window_end_ms - last_emitted_at_ms) + self._overlap_ms
+            desired_bytes = int(bytes_per_second * desired_ms / 1000)
+            if desired_bytes > 0 and len(window_pcm) > desired_bytes:
+                window_pcm = window_pcm[-desired_bytes:]
+                window_duration_seconds = len(window_pcm) / max(bytes_per_second, 1)
+
         enriched_meta = dict(meta)
         enriched_meta['window_duration_ms'] = int(window_duration_seconds * 1000)
+        enriched_meta['window_start_ms'] = max(
+            0,
+            window_end_ms - enriched_meta['window_duration_ms'],
+        )
 
         sr = int(meta.get('sample_rate', 0) or 0)
         ch = max(int(meta.get('channels', 1)), 1)

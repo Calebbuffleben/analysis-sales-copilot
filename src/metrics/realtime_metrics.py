@@ -113,6 +113,37 @@ ANALYSIS_MS = _metric_or_noop(
     buckets=(5, 20, 50, 100, 200, 300, 500, 1000),
 )
 
+AUDIO_LLM_CALLS_TOTAL = _metric_or_noop(
+    Counter,
+    'audio_llm_calls_total',
+    'Total direct audio analysis calls made to the multimodal LLM.',
+)
+
+AUDIO_LLM_ERRORS_TOTAL = _metric_or_noop(
+    Counter,
+    'audio_llm_errors_total',
+    'Total direct audio analysis calls that failed.',
+)
+
+AUDIO_LLM_LATENCY_MS = _metric_or_noop(
+    Histogram,
+    'audio_llm_latency_ms',
+    'Multimodal audio analysis request latency (ms).',
+    buckets=(100, 250, 500, 1000, 2000, 4000, 8000, 15000),
+)
+
+AUDIO_LLM_INPUT_SECONDS_TOTAL = _metric_or_noop(
+    Counter,
+    'audio_llm_input_seconds_total',
+    'Total audio seconds sent to the multimodal LLM.',
+)
+
+AUDIO_LLM_SILENCE_SKIPPED_TOTAL = _metric_or_noop(
+    Counter,
+    'audio_llm_silence_skipped_total',
+    'Total silent audio windows skipped before multimodal analysis.',
+)
+
 PUBLISH_GRPC_MS = _metric_or_noop(
     Histogram,
     'publish_grpc_ms',

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import logging
 import time
+import wave
 from typing import Any, Optional
 
 from ...feedback_trace import log_feedback_trace, make_feedback_trace_id
@@ -18,6 +20,8 @@ from ...metrics.realtime_metrics import (
     ANALYSIS_MS,
     ACOUSTIC_CLASS_TOTAL,
     ACOUSTIC_ROUTING_SKIPPED_TOTAL,
+    AUDIO_LLM_INPUT_SECONDS_TOTAL,
+    AUDIO_LLM_SILENCE_SKIPPED_TOTAL,
     PIPELINE_TOTAL_MS,
     STT_MS,
     WINDOW_END_TO_PIPELINE_START_MS,
@@ -139,6 +143,7 @@ class TranscriptionPipelineService:
         feedback_allow_host_publish: bool = False,
         acoustic_routing_enabled: bool = True,
         acoustic_shadow_mode: bool = False,
+        multimodal_audio_enabled: bool = False,
     ) -> None:
         self._transcription_service = transcription_service
         self._text_analysis_service = text_analysis_service
@@ -150,6 +155,7 @@ class TranscriptionPipelineService:
         self._feedback_allow_host_publish = feedback_allow_host_publish
         self._acoustic_routing_enabled = acoustic_routing_enabled
         self._acoustic_shadow_mode = acoustic_shadow_mode
+        self._multimodal_audio_enabled = multimodal_audio_enabled
 
 
     def _on_window_ready(
@@ -168,6 +174,9 @@ class TranscriptionPipelineService:
         meta: dict,
     ) -> None:
         """Process one ready window: STT, analysis, publish."""
+        if self._multimodal_audio_enabled:
+            self._process_audio_window(stream_key, window_pcm, meta)
+            return
         if self._transcription_service is None:
             logger.debug(
                 'Ignoring ready window because local STT is disabled | stream_key=%s',
@@ -321,6 +330,120 @@ class TranscriptionPipelineService:
                 'transcriptChars': len(chunk.text or ''),
             },
         )
+
+    def _process_audio_window(
+        self,
+        stream_key: str,
+        window_pcm: bytes,
+        meta: dict,
+    ) -> None:
+        """Send one bounded PCM window directly to the multimodal LLM."""
+        stats = compute_pcm_window_stats(
+            window_pcm,
+            sample_rate=int(meta.get('sample_rate', 0) or 0),
+            channels=max(int(meta.get('channels', 1) or 1), 1),
+        )
+        samples = max(int(stats.get('samples_count') or 0), 1)
+        speech_ratio = float(stats.get('speech_count') or 0) / samples
+        mean_rms = stats.get('mean_rms_dbfs')
+        if speech_ratio <= 0.0 and (mean_rms is None or float(mean_rms) < -55.0):
+            WINDOW_SKIPPED_EMPTY_TOTAL.inc()
+            AUDIO_LLM_SILENCE_SKIPPED_TOTAL.inc()
+            return
+
+        chunk = TranscriptionChunk(
+            meeting_id=str(meta['meeting_id']),
+            participant_id=str(meta['participant_id']),
+            track=str(meta['track']),
+            text='',
+            confidence=0.0,
+            timestamp_ms=int(meta['window_end_ms']),
+            window_start_ms=int(meta['window_start_ms']),
+            window_end_ms=int(meta['window_end_ms']),
+            tenant_id=str(meta.get('tenant_id') or ''),
+            participant_role=str(meta.get('participant_role') or ''),
+        )
+        observe_only = _should_observe_only(
+            participant_role=chunk.participant_role,
+            acoustic_class=meta.get('acoustic_class'),
+            extra_meta=meta,
+            routing_enabled=self._acoustic_routing_enabled,
+            shadow_mode=self._acoustic_shadow_mode,
+        )
+        wav_bytes = self._pcm_to_wav(
+            window_pcm,
+            sample_rate=int(meta.get('sample_rate', 0) or 0),
+            channels=max(int(meta.get('channels', 1) or 1), 1),
+        )
+        AUDIO_LLM_INPUT_SECONDS_TOTAL.inc(
+            len(window_pcm)
+            / max(
+                int(meta.get('sample_rate', 0) or 0)
+                * max(int(meta.get('channels', 1) or 1), 1)
+                * 2,
+                1,
+            ),
+        )
+        started = time.perf_counter()
+        if observe_only:
+            analysis, evidence = self._text_analysis_service.observe_audio_context(
+                chunk,
+                wav_bytes,
+            )
+        else:
+            analysis, evidence = self._text_analysis_service.analyze_audio(
+                chunk,
+                wav_bytes,
+            )
+        ANALYSIS_MS.observe((time.perf_counter() - started) * 1000.0)
+        chunk.text = evidence
+        self._apply_audio_window_stats(analysis, window_pcm, meta)
+        published = False if observe_only else self._handle_transcript(
+            stream_key,
+            chunk,
+            analysis,
+        )
+        if published:
+            WINDOW_PROCESSED_TOTAL.inc()
+        log_feedback_trace(
+            logger,
+            logging.INFO,
+            'python.pipeline',
+            trace_id=make_feedback_trace_id(
+                chunk.meeting_id,
+                chunk.participant_id,
+                chunk.window_end_ms,
+            ),
+            meeting_id=chunk.meeting_id,
+            participant_id=chunk.participant_id,
+            window_end_ms=chunk.window_end_ms,
+            extra={
+                'streamKey': stream_key,
+                'provider': 'gemini_audio',
+                'publishEnqueued': published,
+                'hasDirectFeedback': bool(analysis.direct_feedback),
+                'contextOnly': observe_only,
+                'evidenceChars': len(evidence),
+                'speechRatio': round(speech_ratio, 4),
+            },
+        )
+
+    @staticmethod
+    def _pcm_to_wav(
+        pcm: bytes,
+        *,
+        sample_rate: int,
+        channels: int,
+    ) -> bytes:
+        if sample_rate <= 0:
+            raise ValueError('sample_rate must be positive')
+        output = io.BytesIO()
+        with wave.open(output, 'wb') as wav:
+            wav.setnchannels(channels)
+            wav.setsampwidth(2)
+            wav.setframerate(sample_rate)
+            wav.writeframes(pcm)
+        return output.getvalue()
 
     def process_transcript(
         self,

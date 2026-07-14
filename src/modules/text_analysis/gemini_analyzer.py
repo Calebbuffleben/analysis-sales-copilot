@@ -13,15 +13,14 @@ from .gemini_transport import (
     key_prefix,
     sdk_generation_config,
     uses_ai_studio_api_key,
+    uses_vertex_express_api_key,
 )
 from ...pipeline_latency import (
     LatencyTraceContext,
     log_gemini_prompt_sent,
     log_gemini_response_received,
 )
-from .llm_state_validator import (
-    validate_llm_response,
-)
+from .llm_state_validator import validate_llm_response
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +39,8 @@ class QuotaExhaustedError(Exception):
     pass
 
 
-# Backwards-compatible aliases (AQ. keys are NOT Vertex — they use generativelanguage.googleapis.com).
-uses_vertex_express_api = uses_ai_studio_api_key
+# Backwards-compatible aliases.
+uses_vertex_express_api = uses_vertex_express_api_key
 uses_rest_developer_api = uses_ai_studio_api_key
 
 
@@ -173,7 +172,12 @@ class GeminiAnalyzer:
                 'direct_feedback': validated.direct_feedback,
                 'confidence': validated.confidence,
                 'feedback_type': validated.feedback_type,
-                'conversation_state': validated.estado.to_dict(),
+                'evidence_text': validated.evidence_text,
+                'conversation_state': (
+                    raw_data.get('estado')
+                    if isinstance(raw_data.get('estado'), dict)
+                    else {}
+                ),
                 'playbook_template_key': validated.playbook_template_key,
                 'playbook_variables': dict(validated.playbook_variables),
             }
@@ -232,13 +236,114 @@ class GeminiAnalyzer:
             logger.exception(f"Error during Gemini analysis (non-quota): {e}")
             return self._default_response(conversation_state)
 
+    def analyze_audio(
+        self,
+        wav_bytes: bytes,
+        conversation_state: Dict[str, Any],
+        speaker_role: str = 'client',
+        latency_context: Optional[LatencyTraceContext] = None,
+    ) -> Dict[str, Any]:
+        """Analyze one bounded WAV window directly with Gemini."""
+        from google import genai
+        from google.genai import types
+
+        now_ms = int(time.time() * 1000)
+        if now_ms < self._backoff_until_ms:
+            raise QuotaExhaustedError('Gemini API quota is in backoff.')
+
+        prompt = self._build_prompt(
+            'O NOVO TRECHO está no áudio WAV anexado. Interprete a fala diretamente. '
+            'Preencha evidence_text com uma citação curta e literal somente quando '
+            'houver fala inteligível; caso contrário use string vazia.',
+            conversation_state,
+            speaker_role=speaker_role,
+        )
+        prompt += (
+            '\n\nCAMPO ADICIONAL OBRIGATÓRIO NA RAIZ:\n'
+            '"evidence_text": string\n'
+        )
+        prompt_sent_wall_ms: Optional[int] = None
+        if latency_context is not None:
+            prompt_sent_wall_ms = log_gemini_prompt_sent(
+                logger,
+                latency_context,
+                prompt_chars=len(prompt),
+                speaker_role=speaker_role,
+                provider='gemini_audio',
+            )
+
+        try:
+            client = self.client or genai.Client(
+                api_key=self._api_key,
+                vertexai=uses_vertex_express_api_key(self._api_key),
+            )
+            response = client.models.generate_content(
+                model=self.model_name,
+                contents=[
+                    prompt,
+                    types.Part.from_bytes(data=wav_bytes, mime_type='audio/wav'),
+                ],
+                config=sdk_generation_config(json_mode=True),
+            )
+            response_text = response.text or ''
+            if not response_text:
+                return self._default_response(conversation_state)
+            raw_data = json.loads(response_text)
+            validated = validate_llm_response(raw_data)
+            self._consecutive_429_errors = 0
+            self._backoff_until_ms = 0
+            if latency_context is not None and prompt_sent_wall_ms is not None:
+                log_gemini_response_received(
+                    logger,
+                    latency_context,
+                    prompt_sent_wall_ms=prompt_sent_wall_ms,
+                    response_chars=len(response_text),
+                    llm_round_trip_ms=max(
+                        0,
+                        int(time.time() * 1000) - prompt_sent_wall_ms,
+                    ),
+                    has_feedback=bool(validated.direct_feedback),
+                    confidence=validated.confidence,
+                    provider='gemini_audio',
+                )
+            return {
+                'direct_feedback': validated.direct_feedback,
+                'confidence': validated.confidence,
+                'feedback_type': validated.feedback_type,
+                'evidence_text': validated.evidence_text,
+                'conversation_state': (
+                    raw_data.get('estado')
+                    if isinstance(raw_data.get('estado'), dict)
+                    else {}
+                ),
+                'playbook_template_key': validated.playbook_template_key,
+                'playbook_variables': dict(validated.playbook_variables),
+            }
+        except Exception as exc:
+            message = str(exc)
+            if is_auth_error_message(message):
+                raise InvalidGeminiApiKeyError(
+                    f'Gemini authentication failed for slot {self._slot_index}',
+                ) from exc
+            if (
+                '429' in message
+                or 'ResourceExhausted' in message
+                or 'quota' in message.lower()
+            ):
+                self._consecutive_429_errors += 1
+                self._backoff_until_ms = now_ms + 60_000
+                raise QuotaExhaustedError('Gemini audio quota exhausted.') from exc
+            logger.exception('Gemini audio analysis failed: %s', exc)
+            return self._default_response(conversation_state)
+
     def _default_response(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """Return a safe fallback if Gemini fails."""
         return {
             'direct_feedback': '',
             'confidence': 0.0,
             'feedback_type': None,
-            'conversation_state': state,
+            'evidence_text': '',
+            'conversation_state': {},
             'playbook_template_key': None,
             'playbook_variables': {},
         }

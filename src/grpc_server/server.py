@@ -216,13 +216,32 @@ def create_server(config: Settings) -> grpc.Server:
     )
 
     # Create services
+    multimodal_audio = config.audio_analysis_mode == 'multimodal'
     sliding_window_worker = SlidingWindowWorker(
         min_window_seconds=config.audio_buffer_min_window_seconds,
-        min_interval_ms=config.audio_buffer_min_interval_ms,
+        min_interval_ms=(
+            config.audio_analysis_client_interval_ms
+            if multimodal_audio
+            else config.audio_buffer_min_interval_ms
+        ),
+        host_min_interval_ms=(
+            config.audio_analysis_host_interval_ms if multimodal_audio else None
+        ),
+        incremental=multimodal_audio,
+        overlap_ms=config.audio_analysis_overlap_ms if multimodal_audio else 0,
     )
     audio_buffer_service = AudioBufferService(
         worker=sliding_window_worker,
-        window_seconds=config.audio_buffer_window_seconds,
+        window_seconds=max(
+            config.audio_buffer_window_seconds,
+            (
+                config.audio_analysis_host_interval_ms
+                + config.audio_analysis_overlap_ms
+            )
+            / 1000
+            if multimodal_audio
+            else config.audio_buffer_window_seconds,
+        ),
     )
     text_analysis_service = TextAnalysisService()
     service_jwt_provider: ServiceJwtProvider | None = None
@@ -268,7 +287,7 @@ def create_server(config: Settings) -> grpc.Server:
         text_analysis_service._publish_dispatcher = publish_dispatcher
 
     transcription_service: TranscriptionService | None = None
-    if config.stt_provider == 'local':
+    if not multimodal_audio and config.stt_provider == 'local':
         transcription_service = TranscriptionService(
             model_size=config.transcription_model_size,
             device=config.transcription_device,
@@ -289,9 +308,14 @@ def create_server(config: Settings) -> grpc.Server:
         feedback_allow_host_publish=config.feedback_allow_host_publish,
         acoustic_routing_enabled=config.acoustic_routing_enabled,
         acoustic_shadow_mode=config.acoustic_shadow_mode,
+        multimodal_audio_enabled=multimodal_audio,
     )
     partial_coordinator: PartialTurnCoordinator | None = None
-    if config.stt_provider == 'assemblyai' and config.partial_analysis_enabled:
+    if (
+        not multimodal_audio
+        and config.stt_provider == 'assemblyai'
+        and config.partial_analysis_enabled
+    ):
 
         def _on_partial_ready(
             stream_key: str,
@@ -341,7 +365,7 @@ def create_server(config: Settings) -> grpc.Server:
         transcription_pipeline_service._partial_coordinator = partial_coordinator
 
     streaming_stt_provider: AssemblyAiStreamingProvider | None = None
-    if config.stt_provider == 'assemblyai':
+    if not multimodal_audio and config.stt_provider == 'assemblyai':
         assert config.assemblyai_api_key
 
         def _on_assemblyai_final(
@@ -452,7 +476,16 @@ def create_server(config: Settings) -> grpc.Server:
     )
 
     logger.info(f"Servidor gRPC criado com {config.grpc_workers} workers")
-    if config.stt_provider == 'assemblyai':
+    if multimodal_audio:
+        logger.info(
+            'Audio analysis | mode=multimodal | model=%s | client_interval_ms=%s | '
+            'host_interval_ms=%s | overlap_ms=%s',
+            config.gemini_model,
+            config.audio_analysis_client_interval_ms,
+            config.audio_analysis_host_interval_ms,
+            config.audio_analysis_overlap_ms,
+        )
+    elif config.stt_provider == 'assemblyai':
         logger.info(
             'STT config | provider=assemblyai | model=%s | api_host=%s | '
             'sample_rate=%s | format_turns=%s | continuous_partials=%s | '
@@ -528,6 +561,8 @@ def create_server(config: Settings) -> grpc.Server:
     if config.preload_ml_models and transcription_service is not None:
         logger.info('PRELOAD_ML_MODELS=true — loading Whisper + embedding model...')
         _warmup_ml_models(transcription_service, text_analysis_service)
+    elif multimodal_audio:
+        logger.info('AUDIO_ANALYSIS_MODE=multimodal — skipping all STT model preload')
     elif config.stt_provider == 'assemblyai':
         logger.info('STT_PROVIDER=assemblyai — skipping local Whisper preload')
     else:
