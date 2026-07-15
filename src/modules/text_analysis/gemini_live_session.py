@@ -676,6 +676,7 @@ class GeminiLiveManager:
             return
 
         async def _run() -> None:
+            started = time.perf_counter()
             try:
                 snapshot = await asyncio.to_thread(
                     analyze_turn_prosody,
@@ -690,11 +691,33 @@ class GeminiLiveManager:
                 while len(session.prosody_by_turn) > _PROSODY_CACHE_MAX:
                     oldest = next(iter(session.prosody_by_turn))
                     session.prosody_by_turn.pop(oldest, None)
-            except Exception:
-                logger.exception(
-                    'prosody.analyze_failed | meeting=%s | turnId=%s',
+                elapsed_ms = (time.perf_counter() - started) * 1000.0
+                logger.info(
+                    'prosody.analyze_ok | meeting=%s | turnId=%s | '
+                    'durationMs=%s | meanRmsDbfs=%s | speechRatio=%.3f | '
+                    'pauseCount=%s | longestPauseMs=%s | energy=%s | '
+                    'hesitation=%s | distinctive=%s | analyzeMs=%.1f',
                     session.meeting_id,
                     turn_id,
+                    snapshot.duration_ms,
+                    snapshot.mean_rms_dbfs,
+                    snapshot.speech_ratio,
+                    snapshot.pause_count,
+                    snapshot.longest_pause_ms,
+                    snapshot.energy_level,
+                    snapshot.hesitation_hint,
+                    snapshot.is_distinctive(),
+                    elapsed_ms,
+                )
+            except Exception:
+                elapsed_ms = (time.perf_counter() - started) * 1000.0
+                logger.exception(
+                    'prosody.analyze_failed | meeting=%s | turnId=%s | '
+                    'pcmBytes=%s | analyzeMs=%.1f',
+                    session.meeting_id,
+                    turn_id,
+                    len(turn_pcm),
+                    elapsed_ms,
                 )
             finally:
                 session._prosody_tasks.pop(turn_id, None)
@@ -729,13 +752,19 @@ class GeminiLiveManager:
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=_PROSODY_PUBLISH_WAIT_S)
         except (asyncio.TimeoutError, asyncio.CancelledError):
+            logger.info(
+                'prosody.wait_timeout | meeting=%s | turnId=%s | '
+                'waitMs=%s',
+                session.meeting_id,
+                turn_id,
+                int(_PROSODY_PUBLISH_WAIT_S * 1000),
+            )
             return session.prosody_by_turn.get(turn_id)
         except Exception:
-            logger.debug(
+            logger.exception(
                 'prosody.wait_failed | meeting=%s | turnId=%s',
                 session.meeting_id,
                 turn_id,
-                exc_info=True,
             )
             return session.prosody_by_turn.get(turn_id)
         return session.prosody_by_turn.get(turn_id)
@@ -879,6 +908,23 @@ class GeminiLiveManager:
 
         # Best-effort prosody merge; fail-open if analysis still running.
         prosody = await self._await_prosody(session, turn_id)
+        if prosody is not None:
+            logger.info(
+                'prosody.merge_ok | meeting=%s | turnId=%s | '
+                'energy=%s | hesitation=%s | meanRmsDbfs=%s',
+                session.meeting_id,
+                turn_id,
+                prosody.energy_level,
+                prosody.hesitation_hint,
+                prosody.mean_rms_dbfs,
+            )
+        else:
+            logger.info(
+                'prosody.merge_miss | meeting=%s | turnId=%s | '
+                'reason=not_ready_or_failed',
+                session.meeting_id,
+                turn_id,
+            )
 
         # Publish on a worker thread — PublishDispatcher is sync/thread-safe.
         await asyncio.to_thread(
