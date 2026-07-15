@@ -36,6 +36,8 @@ from ..audio_buffer.service import WAV_HEADER_BYTES
 from .gemini_transport import uses_vertex_express_api_key
 from .live_cost import MeetingCostTracker
 from .live_feedback_publisher import LiveFeedbackPublisher
+from ..playbooks.catalog_cache import PlaybookCatalogCache
+from ..playbooks.resolve import format_catalog_for_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +150,7 @@ class _MeetingSession:
     # True after activity_end until tool call handled or timeout.
     awaiting_tool: bool = False
     model_turn_done: asyncio.Event = field(default_factory=asyncio.Event)
+    catalog_prompt: str = ''
 
 
 class GeminiLiveManager:
@@ -167,6 +170,7 @@ class GeminiLiveManager:
         context_window_tokens: int = 12_000,
         session_rotation_minutes: float = 2.0,
         on_unavailable: Optional[Callable[[str], None]] = None,
+        catalog_cache: Optional[PlaybookCatalogCache] = None,
     ) -> None:
         self._api_key = (api_key or '').strip()
         self._model_name = model_name
@@ -179,6 +183,7 @@ class GeminiLiveManager:
         self._context_window_tokens = context_window_tokens
         self._rotation_minutes = session_rotation_minutes
         self._on_unavailable = on_unavailable
+        self._catalog_cache = catalog_cache
 
         self._lock = threading.Lock()
         self._sessions: dict[str, _MeetingSession] = {}
@@ -268,6 +273,24 @@ class GeminiLiveManager:
                 opened_wall_ms=int(time.time() * 1000),
             )
             self._sessions[meeting_id] = session
+
+        # Warm playbook catalog off the audio hot path (once per meeting).
+        if self._catalog_cache is not None and tenant_id:
+            try:
+                templates = self._catalog_cache.get(tenant_id)
+                session.catalog_prompt = format_catalog_for_prompt(templates)
+                logger.info(
+                    'playbook.catalog_loaded | tenant=%s | meeting=%s | n=%s',
+                    tenant_id,
+                    meeting_id,
+                    len(templates),
+                )
+            except Exception:
+                logger.exception(
+                    'playbook.catalog_warm_failed | tenant=%s | meeting=%s',
+                    tenant_id,
+                    meeting_id,
+                )
 
         loop = self._wait_for_loop()
         if loop is None:
@@ -487,9 +510,13 @@ class GeminiLiveManager:
         except Exception:
             thinking = None
 
+        system_instruction = SYSTEM_INSTRUCTION
+        if session.catalog_prompt:
+            system_instruction = f'{SYSTEM_INSTRUCTION}\n\n{session.catalog_prompt}'
+
         kwargs: dict[str, Any] = {
             'response_modalities': ['AUDIO'],
-            'system_instruction': SYSTEM_INSTRUCTION,
+            'system_instruction': system_instruction,
             'tools': [EMIT_FEEDBACK_TOOL],
             'realtime_input_config': {
                 'automatic_activity_detection': {'disabled': True},

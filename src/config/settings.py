@@ -23,6 +23,7 @@ class Settings:
     service_token_mint_ttl_seconds: int = 3600
     service_token_mint_retries: int = 4
     service_token_mint_backoff_seconds: float = 1.0
+    playbook_url_allowlist: str = ''
     storage_dir: str = '/app/storage'
     audio_buffer_window_seconds: float = 10.0
     audio_buffer_min_window_seconds: float = 4.0
@@ -181,6 +182,9 @@ class Settings:
                 0.0,
                 float(os.getenv('SERVICE_TOKEN_MINT_BACKOFF_SECONDS', '1.0')),
             ),
+            playbook_url_allowlist=(
+                os.getenv('PLAYBOOK_URL_ALLOWLIST') or ''
+            ).strip(),
             storage_dir=os.getenv('STORAGE_DIR', '/app/storage'),
             audio_buffer_window_seconds=float(
                 os.getenv('AUDIO_BUFFER_WINDOW_SECONDS', '10.0'),

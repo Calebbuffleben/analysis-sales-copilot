@@ -25,6 +25,7 @@ from ..modules.backend_feedback.service_jwt_provider import ServiceJwtProvider
 from ..modules.text_analysis.text_analysis_service import TextAnalysisService
 from ..modules.text_analysis.gemini_live_session import GeminiLiveManager
 from ..modules.text_analysis.live_feedback_publisher import LiveFeedbackPublisher
+from ..modules.playbooks.catalog_cache import PlaybookCatalogCache
 from ..feedback_trace import make_feedback_trace_id
 from ..modules.transcription.assemblyai_streaming_provider import (
     AssemblyAiStreamConfig,
@@ -279,9 +280,22 @@ def create_server(config: Settings) -> grpc.Server:
     )
     # Direct desktop feedback hub: broadcasts locally BEFORE the backend
     # gRPC publish; backend stays in the loop for persistence/dashboard only.
+    playbook_catalog: PlaybookCatalogCache | None = None
+    if config.backend_http_base_url and (
+        config.service_bootstrap_key or service_jwt_provider is not None
+    ):
+        playbook_catalog = PlaybookCatalogCache(
+            backend_http_base_url=config.backend_http_base_url,
+            bootstrap_key=config.service_bootstrap_key or '',
+            service_jwt_provider=service_jwt_provider,
+        )
+
     feedback_hub: FeedbackHub | None = None
     if config.desktop_ws_enabled:
-        feedback_hub = FeedbackHub()
+        feedback_hub = FeedbackHub(
+            catalog_cache=playbook_catalog,
+            playbook_url_allowlist=config.playbook_url_allowlist,
+        )
 
     publish_dispatcher = PublishDispatcher(
         backend_feedback_client.publish_feedback,
@@ -477,6 +491,7 @@ def create_server(config: Settings) -> grpc.Server:
             min_speech_ms=config.live_min_speech_ms,
             context_window_tokens=config.live_context_window_tokens,
             session_rotation_minutes=config.live_session_rotation_minutes,
+            catalog_cache=playbook_catalog,
         )
         live_manager.start()
         audio_service.live_manager = live_manager
