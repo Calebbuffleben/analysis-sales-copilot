@@ -117,7 +117,12 @@ def format_catalog_for_prompt(
         if not key:
             continue
         title = _truncate(str(t.get('title') or '').strip(), 80)
-        lines.append(f'- {key}: {title}' if title else f'- {key}')
+        line = f'- {key}: {title}' if title else f'- {key}'
+        excerpt = str(t.get('sourceTextExcerpt') or '').strip()
+        if excerpt:
+            # Cap keeps system_instruction small (latency / token budget).
+            line = f'{line} | {_truncate(excerpt, 160)}'
+        lines.append(line)
     if not lines:
         return ''
     return (

@@ -38,6 +38,14 @@ from .live_cost import MeetingCostTracker
 from .live_feedback_publisher import LiveFeedbackPublisher
 from ..playbooks.catalog_cache import PlaybookCatalogCache
 from ..playbooks.resolve import format_catalog_for_prompt
+from ..playbooks.retrieve import (
+    CATALOG_PROMPT_MAX,
+    RETRIEVE_MIN_TEMPLATES,
+    PlaybookIndex,
+    build_retrieve_query,
+    format_retrieve_nudge,
+    hint_from_emit_feedback_args,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +159,8 @@ class _MeetingSession:
     awaiting_tool: bool = False
     model_turn_done: asyncio.Event = field(default_factory=asyncio.Event)
     catalog_prompt: str = ''
+    playbook_index: Optional[PlaybookIndex] = None
+    retrieve_query_hint: str = ''
 
 
 class GeminiLiveManager:
@@ -278,12 +288,29 @@ class GeminiLiveManager:
         if self._catalog_cache is not None and tenant_id:
             try:
                 templates = self._catalog_cache.get(tenant_id)
-                session.catalog_prompt = format_catalog_for_prompt(templates)
+                n = len(templates)
+                session.playbook_index = None
+                session.retrieve_query_hint = ''
+                if n > RETRIEVE_MIN_TEMPLATES:
+                    index = PlaybookIndex.from_templates(templates)
+                    session.playbook_index = index
+                    if n > CATALOG_PROMPT_MAX:
+                        ranked = index.top_templates_for_prompt(
+                            session.context_summary,
+                            max_items=CATALOG_PROMPT_MAX,
+                        )
+                        session.catalog_prompt = format_catalog_for_prompt(ranked)
+                    else:
+                        session.catalog_prompt = format_catalog_for_prompt(templates)
+                else:
+                    session.catalog_prompt = format_catalog_for_prompt(templates)
                 logger.info(
-                    'playbook.catalog_loaded | tenant=%s | meeting=%s | n=%s',
+                    'playbook.catalog_loaded | tenant=%s | meeting=%s | n=%s | '
+                    'retrieve=%s',
                     tenant_id,
                     meeting_id,
-                    len(templates),
+                    n,
+                    bool(session.playbook_index),
                 )
             except Exception:
                 logger.exception(
@@ -592,12 +619,14 @@ class GeminiLiveManager:
             )
             async with session.send_lock:
                 await live.send_realtime_input(activity_end=types.ActivityEnd())
-                await live.send_realtime_input(
-                    text=(
-                        f'Turno encerrado. turnId="{event.turn_id}". '
-                        'Chame emit_feedback agora com este turnId.'
-                    ),
+                nudge = (
+                    f'Turno encerrado. turnId="{event.turn_id}". '
+                    'Chame emit_feedback agora com este turnId.'
                 )
+                candidates = self._playbook_candidates_nudge(session)
+                if candidates:
+                    nudge = f'{nudge}\n{candidates}'
+                await live.send_realtime_input(text=nudge)
             return
 
     async def _receive_loop(self, session: _MeetingSession, live: Any, types: Any) -> None:
@@ -734,6 +763,9 @@ class GeminiLiveManager:
             latency_ms,
         )
 
+        # Seed next-turn RAG query (memory only).
+        session.retrieve_query_hint = hint_from_emit_feedback_args(args)
+
         # Publish on a worker thread — PublishDispatcher is sync/thread-safe.
         await asyncio.to_thread(
             self._publisher.publish_tool_call,
@@ -745,6 +777,29 @@ class GeminiLiveManager:
             speech_end_ms=speech_end_ms,
             turn_id=turn_id,
         )
+
+    def _playbook_candidates_nudge(self, session: _MeetingSession) -> str:
+        index = session.playbook_index
+        if index is None:
+            return ''
+        query = build_retrieve_query(
+            context_summary=session.context_summary,
+            retrieve_query_hint=session.retrieve_query_hint,
+        )
+        if not query.strip():
+            return ''
+        started = time.perf_counter()
+        hits = index.retrieve(query, k=3)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        if elapsed_ms > 10.0 or hits:
+            logger.info(
+                'playbook.retrieve | meeting=%s | k=%s | keys=%s | ms=%.1f',
+                session.meeting_id,
+                len(hits),
+                ','.join(h.key for h in hits),
+                elapsed_ms,
+            )
+        return format_retrieve_nudge(hits)
 
     def _should_rotate(self, session: _MeetingSession) -> bool:
         if session.rotation_minutes <= 0:
