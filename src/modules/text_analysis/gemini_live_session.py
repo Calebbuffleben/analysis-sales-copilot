@@ -163,6 +163,7 @@ class GeminiLiveManager:
         alert_cost_usd: float = 1.0,
         max_concurrent_sessions: int = 20,
         silence_duration_ms: int = 250,
+        min_speech_ms: int = 400,
         context_window_tokens: int = 12_000,
         session_rotation_minutes: float = 2.0,
         on_unavailable: Optional[Callable[[str], None]] = None,
@@ -174,6 +175,7 @@ class GeminiLiveManager:
         self._alert_cost = alert_cost_usd
         self._max_sessions = max_concurrent_sessions
         self._silence_ms = silence_duration_ms
+        self._min_speech_ms = min_speech_ms
         self._context_window_tokens = context_window_tokens
         self._rotation_minutes = session_rotation_minutes
         self._on_unavailable = on_unavailable
@@ -260,6 +262,7 @@ class GeminiLiveManager:
                     sample_rate=sample_rate,
                     channels=channels,
                     silence_duration_ms=self._silence_ms,
+                    min_speech_ms=self._min_speech_ms,
                 ),
                 rotation_minutes=self._rotation_minutes,
                 opened_wall_ms=int(time.time() * 1000),
@@ -311,6 +314,7 @@ class GeminiLiveManager:
                     sample_rate=sample_rate,
                     channels=channels,
                     silence_duration_ms=self._silence_ms,
+                    min_speech_ms=self._min_speech_ms,
                 )
 
         pcm = _extract_pcm(wav_or_pcm)
@@ -516,18 +520,6 @@ class GeminiLiveManager:
         meta: dict[str, str],
     ) -> None:
         if event.kind == 'activity_start':
-            # Wait out a prior model turn so we do not start activity mid-tool.
-            if session.awaiting_tool:
-                try:
-                    await asyncio.wait_for(session.model_turn_done.wait(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        'live.vad.start_timeout | meeting=%s | turnId=%s',
-                        session.meeting_id,
-                        event.turn_id,
-                    )
-                    session.awaiting_tool = False
-            session.model_turn_done.clear()
             logger.info(
                 'live.vad.start | meeting=%s | turnId=%s',
                 session.meeting_id,
@@ -573,6 +565,12 @@ class GeminiLiveManager:
             )
             async with session.send_lock:
                 await live.send_realtime_input(activity_end=types.ActivityEnd())
+                await live.send_realtime_input(
+                    text=(
+                        f'Turno encerrado. turnId="{event.turn_id}". '
+                        'Chame emit_feedback agora com este turnId.'
+                    ),
+                )
             return
 
     async def _receive_loop(self, session: _MeetingSession, live: Any, types: Any) -> None:
@@ -667,6 +665,10 @@ class GeminiLiveManager:
         if function_responses:
             async with session.send_lock:
                 await live.send_tool_response(function_responses=function_responses)
+            # Release next VAD turn immediately — turn_complete often never
+            # arrives for tool-only replies and used to cost a 2s start_timeout.
+            session.awaiting_tool = False
+            session.model_turn_done.set()
 
     async def _on_emit_feedback(
         self,

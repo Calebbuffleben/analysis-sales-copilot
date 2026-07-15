@@ -474,6 +474,7 @@ def create_server(config: Settings) -> grpc.Server:
             alert_cost_usd=config.live_alert_cost_usd,
             max_concurrent_sessions=config.live_max_concurrent_sessions,
             silence_duration_ms=config.live_silence_duration_ms,
+            min_speech_ms=config.live_min_speech_ms,
             context_window_tokens=config.live_context_window_tokens,
             session_rotation_minutes=config.live_session_rotation_minutes,
         )
@@ -481,6 +482,9 @@ def create_server(config: Settings) -> grpc.Server:
         audio_service.live_manager = live_manager
         transcription_pipeline_service._live_host_context_fn = (
             live_manager.inject_host_context
+        )
+        transcription_pipeline_service._live_host_observe_interval_ms = (
+            config.live_host_observe_interval_ms
         )
 
     desktop_ws_gateway: DesktopWsGateway | None = None
@@ -513,9 +517,12 @@ def create_server(config: Settings) -> grpc.Server:
     if live_audio:
         logger.info(
             'Audio analysis | mode=live | live_model=%s | silence_ms=%s | '
-            'max_cost_usd=%s | rotation_min=%s | fallback=multimodal_windows',
+            'min_speech_ms=%s | host_observe_ms=%s | max_cost_usd=%s | '
+            'rotation_min=%s | fallback=multimodal_windows',
             config.live_model,
             config.live_silence_duration_ms,
+            config.live_min_speech_ms,
+            config.live_host_observe_interval_ms,
             config.live_max_cost_usd_per_meeting,
             config.live_session_rotation_minutes,
         )

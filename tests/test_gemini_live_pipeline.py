@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import struct
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from src.config.settings import Settings
 from src.modules.audio_buffer.manual_vad import ManualVad
@@ -24,7 +24,13 @@ def _pcm_silence(samples: int) -> bytes:
 
 
 def test_manual_vad_emits_activity_boundaries() -> None:
-    vad = ManualVad(sample_rate=16000, channels=1, silence_duration_ms=100, prefix_ms=0)
+    vad = ManualVad(
+        sample_rate=16000,
+        channels=1,
+        silence_duration_ms=100,
+        prefix_ms=0,
+        min_speech_ms=0,
+    )
     speech = _pcm_tone(1600)  # 100ms
     silence = _pcm_silence(1600)
 
@@ -51,6 +57,43 @@ def test_manual_vad_emits_activity_boundaries() -> None:
     assert end.turn_id == turn_id
     assert end.speech_end_ms is not None
     assert vad.speaking is False
+
+
+def test_manual_vad_min_speech_drops_short_blip() -> None:
+    vad = ManualVad(
+        sample_rate=16000,
+        channels=1,
+        silence_duration_ms=100,
+        prefix_ms=0,
+        min_speech_ms=400,
+    )
+    speech = _pcm_tone(1600)  # 100ms
+    silence = _pcm_silence(1600)
+
+    assert vad.push(speech, timestamp_ms=1000) == []
+    assert vad.speaking is False
+    # Silence before reaching min speech → discard, no Live turn
+    dropped = []
+    for i in range(3):
+        dropped.extend(vad.push(silence, timestamp_ms=1100 + i * 100))
+    assert dropped == []
+    assert vad.speaking is False
+
+
+def test_manual_vad_min_speech_opens_after_enough() -> None:
+    vad = ManualVad(
+        sample_rate=16000,
+        channels=1,
+        silence_duration_ms=100,
+        prefix_ms=0,
+        min_speech_ms=400,
+    )
+    speech = _pcm_tone(1600)  # 100ms each
+    events = []
+    for i in range(5):
+        events.extend(vad.push(speech, timestamp_ms=1000 + i * 100))
+    assert any(e.kind == 'activity_start' for e in events)
+    assert vad.speaking is True
 
 
 def test_estimate_cost_usd_from_modality_details() -> None:
@@ -275,3 +318,70 @@ def test_inject_host_context_does_not_enqueue_realtime() -> None:
     manager.inject_host_context('m1', 'Host said pricing is flexible')
     assert 'pricing' in session.context_summary
     assert session.queue.empty()
+
+
+def test_tool_response_releases_awaiting_tool() -> None:
+    async def _run() -> None:
+        manager = GeminiLiveManager(api_key='AIzaSyTest', publisher=MagicMock())
+        session = SimpleNamespace(
+            available=True,
+            meeting_id='m1',
+            cost=MeetingCostTracker(meeting_id='m1', max_cost_usd=3.0),
+            awaiting_tool=True,
+            model_turn_done=asyncio.Event(),
+            resumption_handle=None,
+            send_lock=asyncio.Lock(),
+            pending_turn=None,
+            tenant_id='t1',
+        )
+        live = MagicMock()
+        live.send_tool_response = AsyncMock()
+        types = MagicMock()
+        types.FunctionResponse = MagicMock(side_effect=lambda **kw: SimpleNamespace(**kw))
+        fc = SimpleNamespace(id='1', name='emit_feedback', args={'turnId': 't1', 'feedback': ''})
+        response = SimpleNamespace(
+            usage_metadata=None,
+            session_resumption_update=None,
+            data=None,
+            tool_call=SimpleNamespace(function_calls=[fc]),
+            server_content=None,
+        )
+        manager._on_emit_feedback = AsyncMock()  # type: ignore[method-assign]
+        await manager._handle_server_message(session, live, types, response)
+        assert session.awaiting_tool is False
+        assert session.model_turn_done.is_set()
+        live.send_tool_response.assert_awaited_once()
+
+    asyncio.run(_run())
+
+
+def test_live_host_observe_throttle() -> None:
+    from src.modules.transcription.live_host_observe import should_skip_live_host_observe
+
+    assert (
+        should_skip_live_host_observe(
+            live_host_context_enabled=True,
+            interval_ms=15_000,
+            last_observe_ms=0,
+            now_ms=100_000,
+        )
+        is False
+    )
+    assert (
+        should_skip_live_host_observe(
+            live_host_context_enabled=True,
+            interval_ms=15_000,
+            last_observe_ms=100_000,
+            now_ms=105_000,
+        )
+        is True
+    )
+    assert (
+        should_skip_live_host_observe(
+            live_host_context_enabled=False,
+            interval_ms=15_000,
+            last_observe_ms=100_000,
+            now_ms=105_000,
+        )
+        is False
+    )

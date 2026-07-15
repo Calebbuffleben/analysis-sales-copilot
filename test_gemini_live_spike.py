@@ -167,10 +167,10 @@ def main() -> int:
         )
         return 4
     latency = result.get('vad_end_to_tool_ms')
-    if latency is not None and latency > 850:
-        print(f'⚠️  tool call ok but latency {latency}ms > 850ms budget')
-    else:
-        print('✅ PASS')
+    if latency is not None and latency > 1000:
+        print(f'❌ FAIL: latency {latency}ms > 1000ms SLO')
+        return 5
+    print('✅ PASS')
     return 0
 
 

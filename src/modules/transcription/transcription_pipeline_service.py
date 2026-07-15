@@ -29,6 +29,7 @@ from ...metrics.realtime_metrics import (
     WINDOW_SKIPPED_EMPTY_TOTAL,
 )
 from ..acoustic_fingerprint.correlation_metrics import CORRELATION_METRICS
+from .live_host_observe import should_skip_live_host_observe
 from .partial_turn_coordinator import FinalAction, PartialTurnCoordinator
 from .transcription_service import TranscriptionService
 from .utterance_completeness import text_fingerprint
@@ -145,6 +146,7 @@ class TranscriptionPipelineService:
         acoustic_shadow_mode: bool = False,
         multimodal_audio_enabled: bool = False,
         live_host_context_fn: Optional[Callable[[str, str], None]] = None,
+        live_host_observe_interval_ms: int = 15_000,
     ) -> None:
         self._transcription_service = transcription_service
         self._text_analysis_service = text_analysis_service
@@ -158,7 +160,17 @@ class TranscriptionPipelineService:
         self._acoustic_shadow_mode = acoustic_shadow_mode
         self._multimodal_audio_enabled = multimodal_audio_enabled
         self._live_host_context_fn = live_host_context_fn
+        self._live_host_observe_interval_ms = max(0, int(live_host_observe_interval_ms))
+        self._live_host_last_observe_ms: dict[str, int] = {}
 
+    def _should_skip_live_host_observe(self, meeting_id: str) -> bool:
+        """Throttle host generateContent while Live owns the client path."""
+        return should_skip_live_host_observe(
+            live_host_context_enabled=self._live_host_context_fn is not None,
+            interval_ms=self._live_host_observe_interval_ms,
+            last_observe_ms=self._live_host_last_observe_ms.get(meeting_id, 0),
+            now_ms=int(time.time() * 1000),
+        )
 
     def _on_window_ready(
         self,
@@ -388,11 +400,21 @@ class TranscriptionPipelineService:
         )
         started = time.perf_counter()
         if observe_only:
+            if self._should_skip_live_host_observe(chunk.meeting_id):
+                logger.info(
+                    'live.host_observe_skipped | meeting=%s | interval_ms=%s',
+                    chunk.meeting_id,
+                    self._live_host_observe_interval_ms,
+                )
+                return
             analysis, evidence = self._text_analysis_service.observe_audio_context(
                 chunk,
                 wav_bytes,
             )
             if self._live_host_context_fn is not None:
+                self._live_host_last_observe_ms[chunk.meeting_id] = int(
+                    time.time() * 1000,
+                )
                 summary = (
                     f'estado={analysis.conversation_state_json[:500]} '
                     f'evidence={evidence[:200]}'

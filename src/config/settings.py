@@ -47,11 +47,13 @@ class Settings:
     # Gemini Live guardrails / tuning
     live_model: str = 'gemini-3.1-flash-live-preview'
     live_silence_duration_ms: int = 250
+    live_min_speech_ms: int = 400
     live_max_cost_usd_per_meeting: float = 3.0
     live_alert_cost_usd: float = 1.0
     live_max_concurrent_sessions: int = 20
     live_context_window_tokens: int = 12_000
     live_session_rotation_minutes: float = 2.0
+    live_host_observe_interval_ms: int = 15_000
     assemblyai_api_key: Optional[str] = None
     assemblyai_api_host: str = 'streaming.assemblyai.com'
     assemblyai_speech_model: str = 'u3-rt-pro'
@@ -230,6 +232,9 @@ class Settings:
             live_silence_duration_ms=int(
                 os.getenv('LIVE_SILENCE_DURATION_MS', '250'),
             ),
+            live_min_speech_ms=int(
+                os.getenv('LIVE_MIN_SPEECH_MS', '400'),
+            ),
             live_max_cost_usd_per_meeting=float(
                 os.getenv('LIVE_MAX_COST_USD_PER_MEETING', '3.0'),
             ),
@@ -244,6 +249,9 @@ class Settings:
             ),
             live_session_rotation_minutes=float(
                 os.getenv('LIVE_SESSION_ROTATION_MINUTES', '2.0'),
+            ),
+            live_host_observe_interval_ms=int(
+                os.getenv('LIVE_HOST_OBSERVE_INTERVAL_MS', '15000'),
             ),
             assemblyai_api_key=(os.getenv('ASSEMBLYAI_API_KEY') or '').strip() or None,
             assemblyai_api_host=os.getenv(
@@ -533,6 +541,8 @@ class Settings:
         if self.audio_analysis_mode == 'live':
             if self.live_silence_duration_ms < 50:
                 raise ValueError('LIVE_SILENCE_DURATION_MS must be >= 50.')
+            if self.live_min_speech_ms < 0:
+                raise ValueError('LIVE_MIN_SPEECH_MS must be >= 0.')
             if self.live_max_cost_usd_per_meeting <= 0:
                 raise ValueError('LIVE_MAX_COST_USD_PER_MEETING must be > 0.')
             if self.live_alert_cost_usd < 0:
@@ -543,6 +553,8 @@ class Settings:
                 raise ValueError('LIVE_CONTEXT_WINDOW_TOKENS must be >= 1000.')
             if self.live_session_rotation_minutes <= 0:
                 raise ValueError('LIVE_SESSION_ROTATION_MINUTES must be > 0.')
+            if self.live_host_observe_interval_ms < 0:
+                raise ValueError('LIVE_HOST_OBSERVE_INTERVAL_MS must be >= 0.')
         if self.audio_analysis_mode == 'transcript' and self.stt_provider == 'assemblyai':
             if not (self.assemblyai_api_key or '').strip():
                 raise ValueError(

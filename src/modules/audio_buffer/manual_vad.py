@@ -28,6 +28,9 @@ class ManualVad:
 
     Ceiling: crude abs-sample heuristic (same threshold as audio_diagnostics).
     Upgrade path: WebRTC VAD or model-based endpointing if false ends rise.
+
+    min_speech_ms: hold activity_start until enough speech accumulated so
+    noise blips never open a Live turn (avoids empty micro tool calls).
     """
 
     def __init__(
@@ -38,6 +41,7 @@ class ManualVad:
         silence_duration_ms: int = 250,
         prefix_ms: int = 120,
         speech_ratio_min: float = 0.08,
+        min_speech_ms: int = 400,
     ) -> None:
         self._sample_rate = max(int(sample_rate), 1)
         self._channels = max(int(channels), 1)
@@ -46,9 +50,13 @@ class ManualVad:
             self._sample_rate * self._channels * 2 * max(prefix_ms, 0) / 1000,
         )
         self._speech_ratio_min = max(0.0, min(float(speech_ratio_min), 1.0))
+        self._min_speech_ms = max(0, int(min_speech_ms))
         self._speaking = False
         self._silence_ms = 0
+        self._speech_ms = 0
         self._prefix = bytearray()
+        self._pending = bytearray()
+        self._pending_turn_id = ''
         self._turn_seq = 0
         self._active_turn_id = ''
 
@@ -63,7 +71,10 @@ class ManualVad:
     def reset(self) -> None:
         self._speaking = False
         self._silence_ms = 0
+        self._speech_ms = 0
         self._prefix.clear()
+        self._pending.clear()
+        self._pending_turn_id = ''
         self._active_turn_id = ''
 
     def push(self, pcm: bytes, timestamp_ms: int) -> List[VadEvent]:
@@ -75,40 +86,39 @@ class ManualVad:
         events: List[VadEvent] = []
 
         if not self._speaking:
+            if self._pending_turn_id:
+                return self._push_pending(pcm, timestamp_ms, duration_ms, speechy)
+
             self._append_prefix(pcm)
-            if speechy:
-                self._turn_seq += 1
-                self._active_turn_id = f't{self._turn_seq}-{timestamp_ms}'
-                self._speaking = True
+            if not speechy:
+                return events
+
+            self._turn_seq += 1
+            turn_id = f't{self._turn_seq}-{timestamp_ms}'
+            prefix = bytes(self._prefix)
+            self._prefix.clear()
+            pending = bytearray()
+            if prefix:
+                pending.extend(prefix)
+            if not prefix.endswith(pcm):
+                pending.extend(pcm)
+            speech_ms = self._pcm_duration_ms(bytes(pending)) if pending else duration_ms
+
+            if speech_ms < self._min_speech_ms:
+                self._pending = pending
+                self._pending_turn_id = turn_id
+                self._speech_ms = speech_ms
                 self._silence_ms = 0
-                prefix = bytes(self._prefix)
-                self._prefix.clear()
-                events.append(VadEvent(kind='activity_start', turn_id=self._active_turn_id))
-                if prefix:
-                    events.append(
-                        VadEvent(
-                            kind='audio',
-                            pcm=prefix,
-                            turn_id=self._active_turn_id,
-                        ),
-                    )
-                # Current frame already included in prefix; only send if prefix
-                # did not already contain it (prefix may truncate oldest).
-                if not prefix.endswith(pcm):
-                    events.append(
-                        VadEvent(
-                            kind='audio',
-                            pcm=pcm,
-                            turn_id=self._active_turn_id,
-                        ),
-                    )
-            return events
+                return events
+
+            return self._open_turn(turn_id, bytes(pending), already_includes_pcm=True)
 
         # Speaking
         events.append(
             VadEvent(kind='audio', pcm=pcm, turn_id=self._active_turn_id),
         )
         if speechy:
+            self._speech_ms += duration_ms
             self._silence_ms = 0
             return events
 
@@ -124,16 +134,30 @@ class ManualVad:
             )
             self._speaking = False
             self._silence_ms = 0
+            self._speech_ms = 0
             self._active_turn_id = ''
             self._prefix.clear()
         return events
 
     def force_end(self, timestamp_ms: int) -> List[VadEvent]:
+        if self._pending_turn_id:
+            # Promote short pending speech rather than drop mid-stream flush.
+            events = self._open_turn(
+                self._pending_turn_id,
+                bytes(self._pending),
+                already_includes_pcm=True,
+            )
+            self._pending.clear()
+            self._pending_turn_id = ''
+            if self._speaking:
+                events.extend(self.force_end(timestamp_ms))
+            return events
         if not self._speaking:
             return []
         turn_id = self._active_turn_id
         self._speaking = False
         self._silence_ms = 0
+        self._speech_ms = 0
         self._active_turn_id = ''
         self._prefix.clear()
         return [
@@ -143,6 +167,54 @@ class ManualVad:
                 turn_id=turn_id,
             ),
         ]
+
+    def _push_pending(
+        self,
+        pcm: bytes,
+        timestamp_ms: int,
+        duration_ms: int,
+        speechy: bool,
+    ) -> List[VadEvent]:
+        if speechy:
+            self._pending.extend(pcm)
+            self._speech_ms += duration_ms
+            self._silence_ms = 0
+            if self._speech_ms >= self._min_speech_ms:
+                turn_id = self._pending_turn_id
+                buffered = bytes(self._pending)
+                self._pending.clear()
+                self._pending_turn_id = ''
+                return self._open_turn(turn_id, buffered, already_includes_pcm=True)
+            return []
+
+        self._silence_ms += duration_ms
+        if self._silence_ms >= self._silence_duration_ms:
+            # Noise blip — discard without opening a Live turn.
+            self._pending.clear()
+            self._pending_turn_id = ''
+            self._speech_ms = 0
+            self._silence_ms = 0
+            self._prefix.clear()
+        return []
+
+    def _open_turn(
+        self,
+        turn_id: str,
+        pcm: bytes,
+        *,
+        already_includes_pcm: bool,
+    ) -> List[VadEvent]:
+        del already_includes_pcm  # pcm is the full buffer to forward
+        self._speaking = True
+        self._silence_ms = 0
+        self._speech_ms = self._pcm_duration_ms(pcm) if pcm else 0
+        self._active_turn_id = turn_id
+        events: List[VadEvent] = [
+            VadEvent(kind='activity_start', turn_id=turn_id),
+        ]
+        if pcm:
+            events.append(VadEvent(kind='audio', pcm=pcm, turn_id=turn_id))
+        return events
 
     def _append_prefix(self, pcm: bytes) -> None:
         if self._prefix_bytes <= 0:
