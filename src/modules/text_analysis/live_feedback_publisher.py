@@ -16,6 +16,7 @@ from ...metrics.realtime_metrics import (
     LIVE_TOOL_CALLS_TOTAL,
 )
 from ...pipeline_latency import LatencyTraceContext, log_speech_to_publish_ms
+from ..audio_buffer.prosody_analyzer import ProsodySnapshot
 from ..backend_feedback.publish_dispatcher import PublishDispatcher
 from ..backend_feedback.types import BackendFeedbackEvent
 from .llm_state_validator import (
@@ -60,6 +61,7 @@ class LiveFeedbackPublisher:
         args: dict[str, Any],
         speech_end_ms: int,
         turn_id: str,
+        prosody: Optional[ProsodySnapshot] = None,
     ) -> bool:
         LIVE_TOOL_CALLS_TOTAL.inc()
         dedupe_key = f'{meeting_id}:{turn_id}'
@@ -108,6 +110,11 @@ class LiveFeedbackPublisher:
                 validated.playbook_variables,
             ),
         )
+        if prosody is not None:
+            analysis.samples_count = prosody.samples_count
+            analysis.speech_count = prosody.speech_count
+            analysis.mean_rms_dbfs = prosody.mean_rms_dbfs
+            analysis.prosody_json = prosody.to_json()
         now_ms = int(time.time() * 1000)
         end_ms = int(speech_end_ms or now_ms)
         trace_id = make_feedback_trace_id(meeting_id, participant_id, end_ms)

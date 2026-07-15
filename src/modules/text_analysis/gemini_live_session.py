@@ -32,6 +32,11 @@ from ...metrics.realtime_metrics import (
     LIVE_VAD_END_TO_TOOL_CALL_MS,
 )
 from ..audio_buffer.manual_vad import ManualVad, VadEvent
+from ..audio_buffer.prosody_analyzer import (
+    TURN_PCM_MAX_BYTES,
+    ProsodySnapshot,
+    analyze_turn_prosody,
+)
 from ..audio_buffer.service import WAV_HEADER_BYTES
 from .gemini_transport import uses_vertex_express_api_key
 from .live_cost import MeetingCostTracker
@@ -48,6 +53,10 @@ from ..playbooks.retrieve import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Fail-open: never block Live publish waiting for prosody.
+_PROSODY_PUBLISH_WAIT_S = 0.03
+_PROSODY_CACHE_MAX = 8
 
 EMIT_FEEDBACK_TOOL = {
     'function_declarations': [
@@ -161,6 +170,13 @@ class _MeetingSession:
     catalog_prompt: str = ''
     playbook_index: Optional[PlaybookIndex] = None
     retrieve_query_hint: str = ''
+    # Prosody enrichment (parallel to Live; never blocks send path).
+    sample_rate: int = 16_000
+    channels: int = 1
+    turn_pcm: bytearray = field(default_factory=bytearray)
+    prosody_by_turn: dict[str, ProsodySnapshot] = field(default_factory=dict)
+    last_distinctive_prosody: Optional[ProsodySnapshot] = None
+    _prosody_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
 
 
 class GeminiLiveManager:
@@ -281,6 +297,8 @@ class GeminiLiveManager:
                 ),
                 rotation_minutes=self._rotation_minutes,
                 opened_wall_ms=int(time.time() * 1000),
+                sample_rate=sample_rate,
+                channels=channels,
             )
             self._sessions[meeting_id] = session
 
@@ -366,6 +384,8 @@ class GeminiLiveManager:
                     silence_duration_ms=self._silence_ms,
                     min_speech_ms=self._min_speech_ms,
                 )
+                session.sample_rate = sample_rate
+                session.channels = channels
 
         pcm = _extract_pcm(wav_or_pcm)
         if not pcm:
@@ -574,6 +594,7 @@ class GeminiLiveManager:
         meta: dict[str, str],
     ) -> None:
         if event.kind == 'activity_start':
+            session.turn_pcm.clear()
             logger.info(
                 'live.vad.start | meeting=%s | turnId=%s',
                 session.meeting_id,
@@ -591,6 +612,7 @@ class GeminiLiveManager:
             return
 
         if event.kind == 'audio' and event.pcm:
+            self._append_turn_pcm(session, event.pcm)
             async with session.send_lock:
                 await live.send_realtime_input(
                     audio=types.Blob(
@@ -612,6 +634,9 @@ class GeminiLiveManager:
             )
             session.awaiting_tool = True
             session.model_turn_done.clear()
+            turn_pcm = bytes(session.turn_pcm)
+            session.turn_pcm.clear()
+            self._schedule_prosody(session, event.turn_id, turn_pcm)
             logger.info(
                 'live.vad.end | meeting=%s | turnId=%s',
                 session.meeting_id,
@@ -626,8 +651,94 @@ class GeminiLiveManager:
                 candidates = self._playbook_candidates_nudge(session)
                 if candidates:
                     nudge = f'{nudge}\n{candidates}'
+                prosody_nudge = self._prosody_context_nudge(session)
+                if prosody_nudge:
+                    nudge = f'{nudge}\n{prosody_nudge}'
                 await live.send_realtime_input(text=nudge)
             return
+
+    @staticmethod
+    def _append_turn_pcm(session: _MeetingSession, pcm: bytes) -> None:
+        if not pcm:
+            return
+        remaining = TURN_PCM_MAX_BYTES - len(session.turn_pcm)
+        if remaining <= 0:
+            return
+        session.turn_pcm.extend(pcm[:remaining])
+
+    def _schedule_prosody(
+        self,
+        session: _MeetingSession,
+        turn_id: str,
+        turn_pcm: bytes,
+    ) -> None:
+        if not turn_id or not turn_pcm:
+            return
+
+        async def _run() -> None:
+            try:
+                snapshot = await asyncio.to_thread(
+                    analyze_turn_prosody,
+                    turn_pcm,
+                    sample_rate=session.sample_rate,
+                    channels=session.channels,
+                )
+                session.prosody_by_turn[turn_id] = snapshot
+                if snapshot.is_distinctive():
+                    session.last_distinctive_prosody = snapshot
+                # Bound cache so long meetings do not retain every turn.
+                while len(session.prosody_by_turn) > _PROSODY_CACHE_MAX:
+                    oldest = next(iter(session.prosody_by_turn))
+                    session.prosody_by_turn.pop(oldest, None)
+            except Exception:
+                logger.exception(
+                    'prosody.analyze_failed | meeting=%s | turnId=%s',
+                    session.meeting_id,
+                    turn_id,
+                )
+            finally:
+                session._prosody_tasks.pop(turn_id, None)
+
+        # Cancel stale task for same turnId if any.
+        prev = session._prosody_tasks.pop(turn_id, None)
+        if prev is not None and not prev.done():
+            prev.cancel()
+        session._prosody_tasks[turn_id] = asyncio.create_task(
+            _run(),
+            name=f'prosody-{session.meeting_id}-{turn_id[:8]}',
+        )
+
+    @staticmethod
+    def _prosody_context_nudge(session: _MeetingSession) -> str:
+        snap = session.last_distinctive_prosody
+        if snap is None:
+            return ''
+        return snap.nudge_line()
+
+    async def _await_prosody(
+        self,
+        session: _MeetingSession,
+        turn_id: str,
+    ) -> Optional[ProsodySnapshot]:
+        existing = session.prosody_by_turn.get(turn_id)
+        if existing is not None:
+            return existing
+        task = session._prosody_tasks.get(turn_id)
+        if task is None:
+            return None
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=_PROSODY_PUBLISH_WAIT_S)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            return session.prosody_by_turn.get(turn_id)
+        except Exception:
+            logger.debug(
+                'prosody.wait_failed | meeting=%s | turnId=%s',
+                session.meeting_id,
+                turn_id,
+                exc_info=True,
+            )
+            return session.prosody_by_turn.get(turn_id)
+        return session.prosody_by_turn.get(turn_id)
 
     async def _receive_loop(self, session: _MeetingSession, live: Any, types: Any) -> None:
         # google-genai AsyncSession.receive() ends after each turn_complete.
@@ -766,6 +877,9 @@ class GeminiLiveManager:
         # Seed next-turn RAG query (memory only).
         session.retrieve_query_hint = hint_from_emit_feedback_args(args)
 
+        # Best-effort prosody merge; fail-open if analysis still running.
+        prosody = await self._await_prosody(session, turn_id)
+
         # Publish on a worker thread — PublishDispatcher is sync/thread-safe.
         await asyncio.to_thread(
             self._publisher.publish_tool_call,
@@ -776,7 +890,12 @@ class GeminiLiveManager:
             args=args,
             speech_end_ms=speech_end_ms,
             turn_id=turn_id,
+            prosody=prosody,
         )
+        # Prefer next nudge from this turn once analyzed (may arrive late).
+        if prosody is not None and prosody.is_distinctive():
+            session.last_distinctive_prosody = prosody
+        session.prosody_by_turn.pop(turn_id, None)
 
     def _playbook_candidates_nudge(self, session: _MeetingSession) -> str:
         index = session.playbook_index

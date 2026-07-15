@@ -178,6 +178,15 @@ class FeedbackHub:
             metadata['speechAnchorMs'] = int(speech_end)
         if event.feedback_trace_id:
             metadata['feedbackTraceId'] = event.feedback_trace_id
+        prosody_raw = (getattr(analysis, 'prosody_json', None) or '').strip()
+        if prosody_raw:
+            try:
+                metadata['prosody'] = json.loads(prosody_raw)
+            except json.JSONDecodeError:
+                logger.debug(
+                    'prosody_json invalid | meeting=%s',
+                    event.meeting_id,
+                )
 
         return {
             'type': 'feedback',
