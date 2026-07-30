@@ -62,6 +62,23 @@ def test_specialist_result_filters_categories_and_merges_state() -> None:
     assert 'Objeção:' in result.next_turn_hint()
 
 
+def test_specialist_result_coerces_null_compliance_and_text_confidence() -> None:
+    payload = {
+        'source_turn_id': 't2-1785435388936',
+        'fase_spin': 'problema',
+        'compliance_flagged': False,
+        'compliance_severity': None,
+        'compliance_reason': None,
+        'secondary_feedback': 'Valide a objeção.',
+        'secondary_feedback_type': 'objection',
+        'confidence': 'alta',
+    }
+    result = SpecialistResult.model_validate(payload)
+    assert result.compliance_severity == 'info'
+    assert result.compliance_reason == ''
+    assert result.confidence == 0.85
+
+
 def test_specialist_analyzer_makes_one_json_call(monkeypatch) -> None:
     calls = []
 

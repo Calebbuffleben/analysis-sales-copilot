@@ -11,7 +11,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 from src.config.settings import Settings
 from src.modules.audio_buffer.manual_vad import ManualVad
-from src.modules.text_analysis.gemini_live_session import GeminiLiveManager
+from src.modules.text_analysis.gemini_live_session import (
+    GeminiLiveManager,
+    _QUEUE_RECV_CLOSED,
+)
 from src.modules.text_analysis.live_cost import MeetingCostTracker, estimate_cost_usd
 from src.modules.text_analysis.live_feedback_publisher import LiveFeedbackPublisher
 from src.modules.text_analysis.live_specialist import (
@@ -296,6 +299,24 @@ def test_live_mode_requires_gemini() -> None:
         assert 'requires LLM_PROVIDER=gemini' in str(exc)
     else:
         raise AssertionError('Expected live mode without gemini to fail')
+
+
+def test_wait_queue_item_reconnects_when_receive_loop_dies() -> None:
+    async def _run() -> object:
+        manager = GeminiLiveManager(api_key='AIzaSyTest', publisher=MagicMock())
+        session = SimpleNamespace(
+            queue=asyncio.Queue(),
+            meeting_id='m1',
+        )
+
+        async def _recv() -> None:
+            raise RuntimeError('1008 policy violation')
+
+        recv_task = asyncio.create_task(_recv())
+        await asyncio.sleep(0)
+        return await manager._wait_queue_item(session, recv_task)
+
+    assert asyncio.run(_run()) is _QUEUE_RECV_CLOSED
 
 
 def test_receive_loop_restarts_after_turn_complete() -> None:

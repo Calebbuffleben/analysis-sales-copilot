@@ -10,6 +10,7 @@ Architecture (ponytail):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import threading
@@ -60,6 +61,9 @@ from ..playbooks.retrieve import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Sentinel: receive loop died; session loop should reconnect.
+_QUEUE_RECV_CLOSED = object()
 
 # Fail-open: never block Live publish waiting for prosody.
 _PROSODY_PUBLISH_WAIT_S = 0.03
@@ -561,8 +565,13 @@ class GeminiLiveManager:
                 recv_task = asyncio.create_task(self._receive_loop(session, live, types))
                 try:
                     while session.available:
-                        item = await session.queue.get()
+                        item = await self._wait_queue_item(session, recv_task)
                         if item is None:
+                            if recv_task.done() and not recv_task.cancelled():
+                                session.awaiting_tool = False
+                            break
+                        if item is _QUEUE_RECV_CLOSED:
+                            session.awaiting_tool = False
                             break
                         # Legacy queue item — host context must not hit realtime mid-call.
                         if isinstance(item, tuple) and item and item[0] == 'host_context':
@@ -601,6 +610,35 @@ class GeminiLiveManager:
         if still is session and session.available and not session.cost.limited:
             session.opened_wall_ms = int(time.time() * 1000)
             session.task = asyncio.create_task(self._session_loop(session))
+
+    async def _wait_queue_item(
+        self,
+        session: _MeetingSession,
+        recv_task: asyncio.Task,
+    ) -> Any:
+        """Wait for the next VAD queue item or detect a dead receive loop."""
+        get_task = asyncio.create_task(session.queue.get())
+        try:
+            done, _pending = await asyncio.wait(
+                {get_task, recv_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if recv_task in done:
+                get_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await get_task
+                exc = recv_task.exception()
+                logger.warning(
+                    'Live receive loop ended — reconnecting | meeting=%s | error=%s',
+                    session.meeting_id,
+                    exc or 'closed',
+                )
+                return _QUEUE_RECV_CLOSED
+            return get_task.result()
+        except Exception:
+            if not get_task.done():
+                get_task.cancel()
+            raise
 
     def _build_config(self, types: Any, session: _MeetingSession) -> Any:
         thinking = None
@@ -849,7 +887,7 @@ class GeminiLiveManager:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.exception(
+                logger.warning(
                     'Live receive loop error | meeting=%s | error=%s',
                     session.meeting_id,
                     exc,
