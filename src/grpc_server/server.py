@@ -25,6 +25,11 @@ from ..modules.backend_feedback.service_jwt_provider import ServiceJwtProvider
 from ..modules.text_analysis.text_analysis_service import TextAnalysisService
 from ..modules.text_analysis.gemini_live_session import GeminiLiveManager
 from ..modules.text_analysis.live_feedback_publisher import LiveFeedbackPublisher
+from ..modules.text_analysis.live_specialist import (
+    GeminiSpecialistAnalyzer,
+    LiveSpecialistRunner,
+)
+from ..modules.text_analysis.live_turn_graph import LiveTurnGraphs
 from ..modules.playbooks.catalog_cache import PlaybookCatalogCache
 from ..feedback_trace import make_feedback_trace_id
 from ..modules.transcription.assemblyai_streaming_provider import (
@@ -479,7 +484,15 @@ def create_server(config: Settings) -> grpc.Server:
     if live_audio:
         keys = config.effective_gemini_api_keys()
         live_key = keys[0] if keys else ''
-        live_publisher = LiveFeedbackPublisher(publish_dispatcher)
+        live_publisher = LiveFeedbackPublisher(
+            publish_dispatcher,
+            secondary_enabled=config.live_secondary_feedback_enabled,
+            secondary_min_confidence=config.live_specialist_min_confidence,
+            secondary_cooldown_ms=config.live_specialist_cooldown_ms,
+            secondary_max_age_ms=config.live_specialist_max_age_ms,
+            secondary_types=config.live_secondary_feedback_types,
+        )
+        turn_graphs = LiveTurnGraphs() if config.live_langgraph_enabled else None
         live_manager = GeminiLiveManager(
             api_key=live_key,
             model_name=config.live_model,
@@ -492,7 +505,21 @@ def create_server(config: Settings) -> grpc.Server:
             context_window_tokens=config.live_context_window_tokens,
             session_rotation_minutes=config.live_session_rotation_minutes,
             catalog_cache=playbook_catalog,
+            turn_graphs=turn_graphs,
         )
+        if config.live_specialist_enabled:
+            specialist_analyzer = GeminiSpecialistAnalyzer(
+                api_key=live_key,
+                model_name=config.live_specialist_model,
+            )
+            specialist_runner = LiveSpecialistRunner(
+                specialist_analyzer.analyze,
+                live_manager.handle_specialist_result,
+                max_queue_size=config.live_specialist_queue_max_size,
+                timeout_ms=config.live_specialist_timeout_ms,
+                max_age_ms=config.live_specialist_max_age_ms,
+            )
+            live_manager.set_specialist_runner(specialist_runner)
         live_manager.start()
         audio_service.live_manager = live_manager
         transcription_pipeline_service._live_host_context_fn = (

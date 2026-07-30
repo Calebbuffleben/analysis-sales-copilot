@@ -178,6 +178,7 @@ class FeedbackHub:
             metadata['speechAnchorMs'] = int(speech_end)
         if event.feedback_trace_id:
             metadata['feedbackTraceId'] = event.feedback_trace_id
+        metadata.update(event.metadata)
         prosody_raw = (getattr(analysis, 'prosody_json', None) or '').strip()
         if prosody_raw:
             try:

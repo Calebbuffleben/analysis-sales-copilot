@@ -41,6 +41,13 @@ from ..audio_buffer.service import WAV_HEADER_BYTES
 from .gemini_transport import uses_vertex_express_api_key
 from .live_cost import MeetingCostTracker
 from .live_feedback_publisher import LiveFeedbackPublisher
+from .live_specialist import (
+    LiveSpecialistRunner,
+    SpecialistResult,
+    SpecialistSnapshot,
+)
+from .live_turn_graph import LiveTurnGraphs
+from .llm_state_validator import validate_llm_response
 from ..playbooks.catalog_cache import PlaybookCatalogCache
 from ..playbooks.resolve import format_catalog_for_prompt
 from ..playbooks.retrieve import (
@@ -170,6 +177,7 @@ class _MeetingSession:
     catalog_prompt: str = ''
     playbook_index: Optional[PlaybookIndex] = None
     retrieve_query_hint: str = ''
+    specialist_hint: str = ''
     # Prosody enrichment (parallel to Live; never blocks send path).
     sample_rate: int = 16_000
     channels: int = 1
@@ -197,6 +205,8 @@ class GeminiLiveManager:
         session_rotation_minutes: float = 2.0,
         on_unavailable: Optional[Callable[[str], None]] = None,
         catalog_cache: Optional[PlaybookCatalogCache] = None,
+        turn_graphs: Optional[LiveTurnGraphs] = None,
+        specialist_runner: Optional[LiveSpecialistRunner] = None,
     ) -> None:
         self._api_key = (api_key or '').strip()
         self._model_name = model_name
@@ -210,6 +220,8 @@ class GeminiLiveManager:
         self._rotation_minutes = session_rotation_minutes
         self._on_unavailable = on_unavailable
         self._catalog_cache = catalog_cache
+        self._turn_graphs = turn_graphs
+        self._specialist_runner = specialist_runner
 
         self._lock = threading.Lock()
         self._sessions: dict[str, _MeetingSession] = {}
@@ -235,6 +247,11 @@ class GeminiLiveManager:
             asyncio.run_coroutine_threadsafe(self._shutdown_all(), loop)
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5.0)
+        if self._specialist_runner is not None:
+            self._specialist_runner.shutdown(wait=True)
+
+    def set_specialist_runner(self, runner: LiveSpecialistRunner) -> None:
+        self._specialist_runner = runner
 
     def is_available(self, meeting_id: str) -> bool:
         with self._lock:
@@ -420,6 +437,8 @@ class GeminiLiveManager:
         if session is None:
             return
         self._publisher.clear_meeting(meeting_id)
+        if self._specialist_runner is not None:
+            self._specialist_runner.clear_meeting(meeting_id)
         if loop is not None:
             asyncio.run_coroutine_threadsafe(self._close_session(session), loop)
 
@@ -437,6 +456,39 @@ class GeminiLiveManager:
             if session is None:
                 return
             session.context_summary = text[:1500]
+
+    def handle_specialist_result(
+        self,
+        snapshot: SpecialistSnapshot,
+        result: SpecialistResult,
+    ) -> None:
+        """Apply background analysis without sending text into Live mid-turn."""
+
+        with self._lock:
+            session = self._sessions.get(snapshot.meeting_id)
+            if session is None:
+                return
+            session.specialist_hint = result.next_turn_hint()
+        self._publisher.publish_secondary_feedback(
+            meeting_id=snapshot.meeting_id,
+            tenant_id=snapshot.tenant_id,
+            participant_id=snapshot.participant_id,
+            participant_role=snapshot.participant_role,
+            parent_turn_id=snapshot.turn_id,
+            speech_end_ms=snapshot.speech_end_ms,
+            feedback=result.secondary_feedback,
+            confidence=result.confidence,
+            feedback_type=result.secondary_feedback_type,
+            evidence_text=result.evidence_text,
+            state=result.merged_state(snapshot.conversation_state),
+            specialist_metadata=result.metadata(),
+        )
+
+    def _consume_specialist_hint(self, session: _MeetingSession) -> str:
+        with self._lock:
+            hint = session.specialist_hint
+            session.specialist_hint = ''
+        return hint
 
     def _run_loop(self) -> None:
         loop = asyncio.new_event_loop()
@@ -642,18 +694,35 @@ class GeminiLiveManager:
                 session.meeting_id,
                 event.turn_id,
             )
-            async with session.send_lock:
-                await live.send_realtime_input(activity_end=types.ActivityEnd())
-                nudge = (
-                    f'Turno encerrado. turnId="{event.turn_id}". '
-                    'Chame emit_feedback agora com este turnId.'
+            base_nudge = (
+                f'Turno encerrado. turnId="{event.turn_id}". '
+                'Chame emit_feedback agora com este turnId.'
+            )
+            context_nudges = [
+                self._prosody_context_nudge(session),
+                self._consume_specialist_hint(session),
+            ]
+            context_nudge = '\n'.join(item for item in context_nudges if item)
+            if self._turn_graphs is not None:
+                pre_state = await self._turn_graphs.run_pre_tool(
+                    {
+                        'participant_role': meta['participant_role'],
+                        'signal_valid': True,
+                        'base_nudge': base_nudge,
+                        'retrieve_fn': lambda: self._playbook_candidates_nudge(session),
+                        'prosody_nudge': context_nudge,
+                    },
                 )
+                nudge = str(pre_state.get('nudge') or base_nudge)
+            else:
+                nudge = base_nudge
                 candidates = self._playbook_candidates_nudge(session)
                 if candidates:
                     nudge = f'{nudge}\n{candidates}'
-                prosody_nudge = self._prosody_context_nudge(session)
-                if prosody_nudge:
-                    nudge = f'{nudge}\n{prosody_nudge}'
+                if context_nudge:
+                    nudge = f'{nudge}\n{context_nudge}'
+            async with session.send_lock:
+                await live.send_realtime_input(activity_end=types.ActivityEnd())
                 await live.send_realtime_input(text=nudge)
             return
 
@@ -906,8 +975,34 @@ class GeminiLiveManager:
         # Seed next-turn RAG query (memory only).
         session.retrieve_query_hint = hint_from_emit_feedback_args(args)
 
+        def publish_primary(prosody_value: Optional[ProsodySnapshot]) -> bool:
+            return self._publisher.publish_tool_call(
+                meeting_id=meta.meeting_id,
+                tenant_id=meta.tenant_id,
+                participant_id=meta.participant_id,
+                participant_role=meta.participant_role,
+                args=args,
+                speech_end_ms=speech_end_ms,
+                turn_id=turn_id,
+                prosody=prosody_value,
+            )
+
+        if self._turn_graphs is not None:
+            post_state = await self._turn_graphs.run_post_tool(
+                {
+                    'turn_id': turn_id,
+                    'args': args,
+                    'await_prosody_fn': lambda: self._await_prosody(session, turn_id),
+                    'publish_fn': publish_primary,
+                },
+            )
+            prosody = post_state.get('prosody')
+            published = bool(post_state.get('published'))
+        else:
+            prosody = await self._await_prosody(session, turn_id)
+            published = await asyncio.to_thread(publish_primary, prosody)
+
         # Best-effort prosody merge; fail-open if analysis still running.
-        prosody = await self._await_prosody(session, turn_id)
         if prosody is not None:
             logger.info(
                 'prosody.merge_ok | meeting=%s | turnId=%s | '
@@ -925,19 +1020,28 @@ class GeminiLiveManager:
                 session.meeting_id,
                 turn_id,
             )
-
-        # Publish on a worker thread — PublishDispatcher is sync/thread-safe.
-        await asyncio.to_thread(
-            self._publisher.publish_tool_call,
-            meeting_id=meta.meeting_id,
-            tenant_id=meta.tenant_id,
-            participant_id=meta.participant_id,
-            participant_role=meta.participant_role,
-            args=args,
-            speech_end_ms=speech_end_ms,
-            turn_id=turn_id,
-            prosody=prosody,
+        logger.info(
+            'live.graph.post | meeting=%s | turnId=%s | published=%s',
+            session.meeting_id,
+            turn_id,
+            published,
         )
+        if published and self._specialist_runner is not None:
+            validated = validate_llm_response(args)
+            self._specialist_runner.enqueue(
+                SpecialistSnapshot(
+                    tenant_id=meta.tenant_id,
+                    meeting_id=meta.meeting_id,
+                    participant_id=meta.participant_id,
+                    participant_role=meta.participant_role,
+                    turn_id=turn_id,
+                    speech_end_ms=speech_end_ms,
+                    evidence_text=(validated.evidence_text or '').strip(),
+                    primary_feedback=(validated.direct_feedback or '').strip(),
+                    conversation_state=validated.estado.to_dict(),
+                    host_context=session.context_summary,
+                ),
+            )
         # Prefer next nudge from this turn once analyzed (may arrive late).
         if prosody is not None and prosody.is_distinctive():
             session.last_distinctive_prosody = prosody

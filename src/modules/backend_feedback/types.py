@@ -1,6 +1,6 @@
 """Types used when publishing canonical feedback events to the backend."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..text_analysis.types import TextAnalysisResult
 
@@ -32,3 +32,4 @@ class BackendFeedbackEvent:
     turn_id: str = ''
     speech_end_ms: int | None = None
     feedback_trace_id: str = ''
+    metadata: dict[str, object] = field(default_factory=dict)

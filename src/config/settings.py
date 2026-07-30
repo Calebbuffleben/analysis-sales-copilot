@@ -55,6 +55,16 @@ class Settings:
     live_context_window_tokens: int = 12_000
     live_session_rotation_minutes: float = 2.0
     live_host_observe_interval_ms: int = 15_000
+    live_langgraph_enabled: bool = True
+    live_specialist_enabled: bool = False
+    live_specialist_model: str = 'gemini-2.5-flash'
+    live_specialist_queue_max_size: int = 32
+    live_specialist_timeout_ms: int = 8_000
+    live_specialist_cooldown_ms: int = 15_000
+    live_specialist_min_confidence: float = 0.7
+    live_specialist_max_age_ms: int = 120_000
+    live_secondary_feedback_enabled: bool = True
+    live_secondary_feedback_types: tuple[str, ...] = ('risk', 'objection')
     assemblyai_api_key: Optional[str] = None
     assemblyai_api_host: str = 'streaming.assemblyai.com'
     assemblyai_speech_model: str = 'u3-rt-pro'
@@ -256,6 +266,44 @@ class Settings:
             ),
             live_host_observe_interval_ms=int(
                 os.getenv('LIVE_HOST_OBSERVE_INTERVAL_MS', '15000'),
+            ),
+            live_langgraph_enabled=os.getenv(
+                'LIVE_LANGGRAPH_ENABLED',
+                'true',
+            ).lower()
+            == 'true',
+            live_specialist_enabled=os.getenv(
+                'LIVE_SPECIALIST_ENABLED',
+                'false',
+            ).lower()
+            == 'true',
+            live_specialist_model=os.getenv(
+                'LIVE_SPECIALIST_MODEL',
+                os.getenv('GEMINI_MODEL', 'gemini-2.5-flash'),
+            ).strip()
+            or 'gemini-2.5-flash',
+            live_specialist_queue_max_size=int(
+                os.getenv('LIVE_SPECIALIST_QUEUE_MAX_SIZE', '32'),
+            ),
+            live_specialist_timeout_ms=int(
+                os.getenv('LIVE_SPECIALIST_TIMEOUT_MS', '8000'),
+            ),
+            live_specialist_cooldown_ms=int(
+                os.getenv('LIVE_SPECIALIST_COOLDOWN_MS', '15000'),
+            ),
+            live_specialist_min_confidence=float(
+                os.getenv('LIVE_SPECIALIST_MIN_CONFIDENCE', '0.7'),
+            ),
+            live_specialist_max_age_ms=int(
+                os.getenv('LIVE_SPECIALIST_MAX_AGE_MS', '120000'),
+            ),
+            live_secondary_feedback_enabled=os.getenv(
+                'LIVE_SECONDARY_FEEDBACK_ENABLED',
+                'true',
+            ).lower()
+            == 'true',
+            live_secondary_feedback_types=cls._parse_csv(
+                os.getenv('LIVE_SECONDARY_FEEDBACK_TYPES', 'risk,objection'),
             ),
             assemblyai_api_key=(os.getenv('ASSEMBLYAI_API_KEY') or '').strip() or None,
             assemblyai_api_host=os.getenv(
@@ -559,6 +607,26 @@ class Settings:
                 raise ValueError('LIVE_SESSION_ROTATION_MINUTES must be > 0.')
             if self.live_host_observe_interval_ms < 0:
                 raise ValueError('LIVE_HOST_OBSERVE_INTERVAL_MS must be >= 0.')
+            if self.live_specialist_queue_max_size < 1:
+                raise ValueError('LIVE_SPECIALIST_QUEUE_MAX_SIZE must be >= 1.')
+            if self.live_specialist_timeout_ms < 100:
+                raise ValueError('LIVE_SPECIALIST_TIMEOUT_MS must be >= 100.')
+            if self.live_specialist_cooldown_ms < 0:
+                raise ValueError('LIVE_SPECIALIST_COOLDOWN_MS must be >= 0.')
+            if not 0.0 <= self.live_specialist_min_confidence <= 1.0:
+                raise ValueError(
+                    'LIVE_SPECIALIST_MIN_CONFIDENCE must be between 0 and 1.',
+                )
+            if self.live_specialist_max_age_ms < 100:
+                raise ValueError('LIVE_SPECIALIST_MAX_AGE_MS must be >= 100.')
+            invalid_secondary_types = set(self.live_secondary_feedback_types) - {
+                'risk',
+                'objection',
+            }
+            if invalid_secondary_types:
+                raise ValueError(
+                    'LIVE_SECONDARY_FEEDBACK_TYPES supports only risk,objection.',
+                )
         if self.audio_analysis_mode == 'transcript' and self.stt_provider == 'assemblyai':
             if not (self.assemblyai_api_key or '').strip():
                 raise ValueError(

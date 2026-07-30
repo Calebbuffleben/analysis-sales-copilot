@@ -542,3 +542,63 @@ LIVE_FALLBACK_TOTAL = _metric_or_noop(
     'live_fallback_total',
     'Total times Live path fell back to generateContent multimodal.',
 )
+
+LANGGRAPH_NODE_MS = _metric_or_noop(
+    Histogram,
+    'langgraph_node_ms',
+    'LangGraph node execution latency in milliseconds.',
+    ('node',),
+    buckets=(0.1, 0.5, 1, 2, 5, 10, 20, 50, 100),
+)
+
+SPECIALIST_QUEUE_SIZE = _metric_or_noop(
+    Gauge,
+    'live_specialist_queue_size',
+    'Current number of queued Live specialist jobs.',
+)
+
+SPECIALIST_CALLS_TOTAL = _metric_or_noop(
+    Counter,
+    'live_specialist_calls_total',
+    'Total combined Live specialist Gemini calls started.',
+)
+
+SPECIALIST_ERRORS_TOTAL = _metric_or_noop(
+    Counter,
+    'live_specialist_errors_total',
+    'Total Live specialist failures and timeouts.',
+)
+
+SPECIALIST_DROPPED_TOTAL = _metric_or_noop(
+    Counter,
+    'live_specialist_dropped_total',
+    'Total Live specialist jobs or results dropped.',
+    ('reason',),
+)
+
+SPECIALIST_LATENCY_MS = _metric_or_noop(
+    Histogram,
+    'live_specialist_latency_ms',
+    'Combined Live specialist Gemini latency in milliseconds.',
+    buckets=(100, 250, 500, 1000, 2000, 3000, 5000, 8000, 15000),
+)
+
+SECONDARY_FEEDBACK_PUBLISHED_TOTAL = _metric_or_noop(
+    Counter,
+    'live_secondary_feedback_published_total',
+    'Total specialist secondary feedback events published.',
+)
+
+SECONDARY_FEEDBACK_SUPPRESSED_TOTAL = _metric_or_noop(
+    Counter,
+    'live_secondary_feedback_suppressed_total',
+    'Total specialist secondary feedback events suppressed.',
+    ('reason',),
+)
+
+SPEECH_END_TO_SECONDARY_WS_MS = _metric_or_noop(
+    Histogram,
+    'live_speech_end_to_secondary_ws_ms',
+    'Wall time from source speech end to secondary WS broadcast enqueue.',
+    buckets=(100, 250, 500, 1000, 2000, 3000, 5000, 8000, 15000),
+)

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import struct
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -12,6 +14,11 @@ from src.modules.audio_buffer.manual_vad import ManualVad
 from src.modules.text_analysis.gemini_live_session import GeminiLiveManager
 from src.modules.text_analysis.live_cost import MeetingCostTracker, estimate_cost_usd
 from src.modules.text_analysis.live_feedback_publisher import LiveFeedbackPublisher
+from src.modules.text_analysis.live_specialist import (
+    LiveSpecialistRunner,
+    SpecialistResult,
+    SpecialistSnapshot,
+)
 from src.modules.backend_feedback.types import BackendFeedbackEvent
 
 
@@ -203,6 +210,66 @@ def test_live_feedback_publisher_rejects_empty_feedback() -> None:
     )
     assert ok is False
     assert dispatcher.events == []
+
+
+def test_slow_specialist_does_not_delay_primary_publish() -> None:
+    dispatcher = _FakeDispatcher()
+    publisher = LiveFeedbackPublisher(dispatcher, min_confidence=0.5)
+    delivered = threading.Event()
+
+    def analyze(snapshot):
+        time.sleep(0.2)
+        return SpecialistResult(
+            source_turn_id=snapshot.turn_id,
+            secondary_feedback='Alerta secundário.',
+            secondary_feedback_type='risk',
+            confidence=0.9,
+        )
+
+    runner = LiveSpecialistRunner(
+        analyze,
+        lambda _snapshot, _result: delivered.set(),
+        timeout_ms=1000,
+    )
+    speech_end_ms = int(time.time() * 1000)
+    started = time.perf_counter()
+    assert publisher.publish_tool_call(
+        meeting_id='meet-1',
+        tenant_id='tenant-1',
+        participant_id='remote',
+        participant_role='client',
+        args={
+            'turnId': 't-primary',
+            'feedback': 'Feedback principal.',
+            'confidence': 0.9,
+            'feedback_type': 'objection',
+            'evidence_text': 'está caro',
+            'estado': {},
+        },
+        speech_end_ms=speech_end_ms,
+        turn_id='t-primary',
+    )
+    assert runner.enqueue(
+        SpecialistSnapshot(
+            tenant_id='tenant-1',
+            meeting_id='meet-1',
+            participant_id='remote',
+            participant_role='client',
+            turn_id='t-primary',
+            speech_end_ms=speech_end_ms,
+            evidence_text='está caro',
+            primary_feedback='Feedback principal.',
+            conversation_state={},
+            host_context='',
+        ),
+    )
+    primary_ms = (time.perf_counter() - started) * 1000.0
+
+    assert len(dispatcher.events) == 1
+    assert primary_ms < 100
+    assert delivered.is_set() is False
+    assert delivered.wait(timeout=2.0)
+    runner.shutdown()
 
 
 def test_live_mode_settings_validate() -> None:
