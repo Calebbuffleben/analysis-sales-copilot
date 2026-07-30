@@ -15,6 +15,33 @@ FASE_SPIN = Literal["neutro", "situacao", "problema", "implicacao", "necessidade
 
 _VALID_FASE_SPIN = frozenset({"neutro", "situacao", "problema", "implicacao", "necessidade"})
 
+_FASE_SPIN_ALIASES = {
+    'fechamento': 'necessidade',
+    'closing': 'necessidade',
+    'close': 'necessidade',
+    'situação': 'situacao',
+    'situation': 'situacao',
+    'problem': 'problema',
+    'implication': 'implicacao',
+    'implicacao': 'implicacao',
+    'need': 'necessidade',
+    'need-payoff': 'necessidade',
+}
+
+
+def normalize_fase_spin(value: object) -> str:
+    """Coerce LLM SPIN phase labels to the canonical set."""
+    if value is None:
+        return 'neutro'
+    s = str(value).lower().strip()
+    if s in _VALID_FASE_SPIN:
+        return s
+    aliased = _FASE_SPIN_ALIASES.get(s)
+    if aliased:
+        return aliased
+    return 'neutro'
+
+
 # Max length for suggested SPIN question (prompt / UI safety)
 _PROXIMA_PERGUNTA_SPIN_MAX_LEN = 500
 _MEETING_PRODUCT_MAX_LEN = 200
@@ -149,14 +176,8 @@ class ConversationState(BaseModel):
 
     @field_validator("fase_spin", mode="before")
     @classmethod
-    def normalize_fase_spin(cls, v) -> str:
-        """Coerce invalid or missing values to neutro."""
-        if v is None:
-            return "neutro"
-        s = str(v).lower().strip()
-        if s in _VALID_FASE_SPIN:
-            return s
-        return "neutro"
+    def normalize_fase_spin_field(cls, v) -> str:
+        return normalize_fase_spin(v)
 
     @field_validator("proxima_pergunta_spin")
     @classmethod

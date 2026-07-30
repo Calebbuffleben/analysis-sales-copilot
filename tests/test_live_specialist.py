@@ -62,6 +62,17 @@ def test_specialist_result_filters_categories_and_merges_state() -> None:
     assert 'Objeção:' in result.next_turn_hint()
 
 
+def test_specialist_result_coerces_fechamento_fase_spin() -> None:
+    result = SpecialistResult.model_validate(
+        {
+            'source_turn_id': 't3-1785442559602',
+            'fase_spin': 'fechamento',
+            'secondary_feedback_type': 'clarification',
+        },
+    )
+    assert result.fase_spin == 'necessidade'
+
+
 def test_specialist_result_coerces_null_compliance_and_text_confidence() -> None:
     payload = {
         'source_turn_id': 't2-1785435388936',

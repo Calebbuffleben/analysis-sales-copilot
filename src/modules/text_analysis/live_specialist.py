@@ -21,7 +21,7 @@ from ...metrics.realtime_metrics import (
     SPECIALIST_QUEUE_SIZE,
 )
 from .gemini_transport import GeminiTransportMode, generate_with_transport_chain
-from .llm_state_validator import VALID_OBJECTION_CATEGORIES
+from .llm_state_validator import VALID_OBJECTION_CATEGORIES, normalize_fase_spin
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +92,7 @@ class SpecialistResult(BaseModel):
             data['objection_hint'] = ''
         if data.get('proxima_pergunta_spin') is None:
             data['proxima_pergunta_spin'] = ''
+        data['fase_spin'] = normalize_fase_spin(data.get('fase_spin'))
         data['confidence'] = _coerce_confidence(data.get('confidence'))
         return data
 
