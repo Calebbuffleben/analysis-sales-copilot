@@ -1,0 +1,261 @@
+# CI/CD: GitHub Actions → Artifact Registry → Cloud Run
+#
+# SA do secret GCP_SA_KEY (obrigatório no AR):
+#   github-actions@iluma-504019.iam.gserviceaccount.com
+#
+# Grant NO REPOSITÓRIO (não só no projeto):
+#   gcloud artifacts repositories add-iam-policy-binding python-service \
+#     --project=iluma-504019 \
+#     --location=southamerica-east1 \
+#     --member="serviceAccount:github-actions@iluma-504019.iam.gserviceaccount.com" \
+#     --role="roles/artifactregistry.writer"
+#
+# Confira no Console:
+#   Artifact Registry → python-service → Permissions
+#   Tem que listar github-actions@… com "Artifact Registry Writer"
+#   Sem condição (condition) no binding.
+
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
+  REGION: southamerica-east1
+  SERVICE_NAME: python-service
+  # Precisa ser repositório Docker Mode=Standard (NÃO Remote — Remote não aceita push)
+  AR_REPO: python-service
+  IMAGE_NAME: python-service
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    outputs:
+      # URI completa com tag (não só o path base)
+      image: ${{ steps.push.outputs.image }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image (PR check)
+        if: github.event_name == 'pull_request'
+        run: docker build -f Dockerfile -t python-service:pr-${{ github.sha }} .
+
+      - name: Require GCP_PROJECT_ID
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
+        run: |
+          if [ -z "${PROJECT_ID}" ]; then
+            echo "::error::GCP_PROJECT_ID vazio (Settings → Actions → Variables)"
+            exit 1
+          fi
+          echo "PROJECT_ID=${PROJECT_ID}" >> "$GITHUB_ENV"
+
+      - name: Authenticate to Google Cloud
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Set up gcloud
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Verify Artifact Registry upload permission
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          ACCOUNT="$(gcloud auth list --filter=status:ACTIVE --format='value(account)')"
+          echo "Active SA: ${ACCOUNT}"
+          echo "Expected:  github-actions@${PROJECT_ID}.iam.gserviceaccount.com"
+
+          POLICY="$(gcloud artifacts repositories get-iam-policy "${AR_REPO}" \
+            --location="${REGION}" \
+            --project="${PROJECT_ID}" \
+            --format=json)"
+          echo "Repository IAM policy:"
+          echo "${POLICY}"
+
+          if ! echo "${POLICY}" | grep -q "${ACCOUNT}"; then
+            echo "::error::SA ${ACCOUNT} não aparece no IAM do repo ${AR_REPO}."
+            exit 1
+          fi
+          if ! echo "${POLICY}" | grep -q 'roles/artifactregistry.writer'; then
+            echo "::error::Repo ${AR_REPO} sem roles/artifactregistry.writer."
+            exit 1
+          fi
+          echo "OK: ${ACCOUNT} tem Artifact Registry Writer no repo."
+
+      - name: Docker login to Artifact Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          gcloud auth print-access-token \
+            | docker login -u oauth2accesstoken --password-stdin "https://${REGION}-docker.pkg.dev"
+
+      - name: Build and Push Docker image
+        id: push
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/${{ env.IMAGE_NAME }}"
+          IMAGE_SHA="${IMAGE}:${{ github.sha }}"
+          IMAGE_LATEST="${IMAGE}:latest"
+          echo "Pushing ${IMAGE_SHA}"
+          docker build -f Dockerfile -t "${IMAGE_SHA}" -t "${IMAGE_LATEST}" .
+          docker push "${IMAGE_SHA}"
+          docker push "${IMAGE_LATEST}"
+          echo "image=${IMAGE_SHA}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Resolve project id
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
+        run: |
+          if [ -z "${PROJECT_ID}" ]; then
+            echo "::error::GCP_PROJECT_ID vazio" >&2
+            exit 1
+          fi
+          echo "PROJECT_ID=${PROJECT_ID}" >> "$GITHUB_ENV"
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Cloud Run
+        env:
+          IMAGE_SHA: ${{ needs.build-and-push.outputs.image }}
+          # Cadastre em: GitHub → Settings → Secrets and variables → Actions → Secrets.
+          # BACKEND_HTTP_BASE_URL também pode ser Variable (URL pública do Cloud Run backend).
+          SERVICE_BOOTSTRAP_KEY: ${{ secrets.SERVICE_BOOTSTRAP_KEY }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          JWT_PUBLIC_KEY: ${{ secrets.JWT_PUBLIC_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
+          ASSEMBLYAI_API_KEY: ${{ secrets.ASSEMBLYAI_API_KEY }}
+          BACKEND_HTTP_BASE_URL: ${{ secrets.BACKEND_HTTP_BASE_URL || vars.BACKEND_HTTP_BASE_URL }}
+          GRPC_FEEDBACK_URL: ${{ secrets.GRPC_FEEDBACK_URL || vars.GRPC_FEEDBACK_URL }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${IMAGE_SHA}" ] || [[ "${IMAGE_SHA}" == :* ]]; then
+            IMAGE_SHA="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          fi
+
+          echo "Deploying image: ${IMAGE_SHA}"
+
+          missing=()
+          [ -z "${SERVICE_BOOTSTRAP_KEY}" ] && missing+=("SERVICE_BOOTSTRAP_KEY")
+          [ -z "${JWT_SECRET}" ] && [ -z "${JWT_PUBLIC_KEY}" ] && missing+=("JWT_SECRET|JWT_PUBLIC_KEY")
+          [ -z "${GEMINI_API_KEY}" ] && [ -z "${GEMINI_API_KEYS}" ] && missing+=("GEMINI_API_KEY|GEMINI_API_KEYS")
+          [ -z "${ASSEMBLYAI_API_KEY}" ] && missing+=("ASSEMBLYAI_API_KEY")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::GitHub Secrets ausentes neste repositório: ${missing[*]}"
+            echo "::error::Settings → Secrets and variables → Actions → New repository secret"
+            exit 1
+          fi
+
+          # Fallback: feedback URL = HTTP base do backend (Cloud Run HTTPS).
+          FEEDBACK_URL="${GRPC_FEEDBACK_URL}"
+          if [ -z "${FEEDBACK_URL}" ] && [ -n "${BACKEND_HTTP_BASE_URL}" ]; then
+            FEEDBACK_URL="${BACKEND_HTTP_BASE_URL}"
+          fi
+          if [ -z "${FEEDBACK_URL}" ] || [ -z "${BACKEND_HTTP_BASE_URL}" ]; then
+            echo "::error::Cadastre BACKEND_HTTP_BASE_URL (e opcionalmente GRPC_FEEDBACK_URL) como Secret ou Variable."
+            echo "::error::Ex.: https://backend-xxxxx-rj.a.run.app"
+            exit 1
+          fi
+
+          # Não setar PORT: Cloud Run injeta conforme --port.
+          # PRELOAD_ML_MODELS=false evita timeout de startup (Whisper) no caminho AssemblyAI/Live.
+          jq -n \
+            --arg bootstrapKey "${SERVICE_BOOTSTRAP_KEY}" \
+            --arg jwtSecret "${JWT_SECRET}" \
+            --arg jwtPublicKey "${JWT_PUBLIC_KEY}" \
+            --arg geminiKey "${GEMINI_API_KEY}" \
+            --arg geminiKeys "${GEMINI_API_KEYS}" \
+            --arg assemblyKey "${ASSEMBLYAI_API_KEY}" \
+            --arg backendHttp "${BACKEND_HTTP_BASE_URL}" \
+            --arg feedbackUrl "${FEEDBACK_URL}" \
+            '{
+              DESKTOP_WS_ENABLED: "true",
+              DESKTOP_WS_REQUIRE_AUTH: "true",
+              DESKTOP_WS_COALESCE_MS: "100",
+              GRPC_PORT: "50051",
+              GRPC_FEEDBACK_ENABLED: "true",
+              GRPC_FEEDBACK_URL: $feedbackUrl,
+              BACKEND_HTTP_BASE_URL: $backendHttp,
+              SERVICE_BOOTSTRAP_KEY: $bootstrapKey,
+              JWT_ISSUER: "meet-backend",
+              JWT_AUDIENCE: "meet-platform",
+              AUDIO_ANALYSIS_MODE: "live",
+              AUDIO_ANALYSIS_CLIENT_INTERVAL_MS: "7000",
+              AUDIO_ANALYSIS_HOST_INTERVAL_MS: "45000",
+              AUDIO_ANALYSIS_OVERLAP_MS: "400",
+              STT_PROVIDER: "assemblyai",
+              LLM_PROVIDER: "gemini",
+              GEMINI_MODEL: "gemini-2.5-flash",
+              GEMINI_RPM_LIMIT: "12",
+              GEMINI_RPM_WINDOW_SEC: "60",
+              GEMINI_KEY_ROUTING: "tenant",
+              LIVE_MODEL: "gemini-3.1-flash-live-preview",
+              LIVE_LANGGRAPH_ENABLED: "true",
+              LIVE_SPECIALIST_ENABLED: "false",
+              PRELOAD_ML_MODELS: "false",
+              LOG_LEVEL: "INFO",
+              METRICS_ENABLED: "false"
+            }
+            + (if $jwtSecret != "" then {JWT_SECRET: $jwtSecret} else {} end)
+            + (if $jwtPublicKey != "" then {JWT_PUBLIC_KEY: $jwtPublicKey} else {} end)
+            + (if $geminiKeys != "" then {GEMINI_API_KEYS: $geminiKeys}
+               elif $geminiKey != "" then {GEMINI_API_KEY: $geminiKey}
+               else {} end)
+            + (if $assemblyKey != "" then {ASSEMBLYAI_API_KEY: $assemblyKey} else {} end)' \
+            > cloud-run-env.json
+
+          # Desvincula envs que eram Secret Manager na revisão antiga.
+          gcloud run deploy "${{ env.SERVICE_NAME }}" \
+            --project="${{ env.PROJECT_ID }}" \
+            --image="${IMAGE_SHA}" \
+            --region="${{ env.REGION }}" \
+            --platform=managed \
+            --allow-unauthenticated \
+            --port=8080 \
+            --min-instances=1 \
+            --max-instances=1 \
+            --timeout=3600 \
+            --cpu=2 \
+            --memory=2Gi \
+            --cpu-boost \
+            --session-affinity \
+            --no-cpu-throttling \
+            --remove-secrets=JWT_PRIVATE_KEY,JWT_PUBLIC_KEY,JWT_SECRET,SERVICE_BOOTSTRAP_KEY,GEMINI_API_KEY,GEMINI_API_KEYS,ASSEMBLYAI_API_KEY,BACKEND_SERVICE_TOKEN \
+            --env-vars-file=cloud-run-env.json
+
+          rm -f cloud-run-env.json
+
+          gcloud run services describe "${{ env.SERVICE_NAME }}" \
+            --project="${{ env.PROJECT_ID }}" \
+            --region="${{ env.REGION }}" \
+            --format='value(status.url)'
