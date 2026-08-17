@@ -15,19 +15,20 @@ from src.modules.text_analysis.gemini_transport import (
 )
 
 
-def test_aq_keys_use_generative_language_api_only() -> None:
+def test_aq_keys_use_vertex_express_transports() -> None:
     modes = transport_candidates('AQ.test-key')
     assert modes == (
-        GeminiTransportMode.REST_DEVELOPER_HEADER,
-        GeminiTransportMode.REST_DEVELOPER_QUERY,
-        GeminiTransportMode.SDK_DEVELOPER,
+        GeminiTransportMode.SDK_VERTEX_EXPRESS,
+        GeminiTransportMode.REST_VERTEX_HEADER,
+        GeminiTransportMode.REST_VERTEX_QUERY,
     )
-    assert GeminiTransportMode.REST_VERTEX_HEADER not in modes
+    assert GeminiTransportMode.SDK_DEVELOPER not in modes
+
+
+def test_aiza_keys_use_developer_transports() -> None:
+    modes = transport_candidates('AIzaSyExample')
+    assert GeminiTransportMode.SDK_DEVELOPER in modes
     assert GeminiTransportMode.SDK_VERTEX_EXPRESS not in modes
-
-
-def test_aiza_keys_same_developer_transports() -> None:
-    assert transport_candidates('AIzaSyExample') == transport_candidates('AQ.test-key')
 
 
 def test_is_auth_error_message() -> None:
@@ -67,7 +68,7 @@ def test_generate_with_transport_chain_falls_back_on_auth_error() -> None:
     def fake_generate(**kwargs):
         mode = kwargs['mode']
         calls.append(mode)
-        if mode == GeminiTransportMode.REST_DEVELOPER_HEADER:
+        if mode == GeminiTransportMode.SDK_VERTEX_EXPRESS:
             raise RuntimeError('401 UNAUTHENTICATED ACCESS_TOKEN_TYPE_UNSUPPORTED')
         return '{"feedback": null}'
 
@@ -83,9 +84,9 @@ def test_generate_with_transport_chain_falls_back_on_auth_error() -> None:
         )
 
     assert text == '{"feedback": null}'
-    assert mode == GeminiTransportMode.REST_DEVELOPER_QUERY
-    assert calls[0] == GeminiTransportMode.REST_DEVELOPER_HEADER
-    assert calls[1] == GeminiTransportMode.REST_DEVELOPER_QUERY
+    assert mode == GeminiTransportMode.REST_VERTEX_HEADER
+    assert calls[0] == GeminiTransportMode.SDK_VERTEX_EXPRESS
+    assert calls[1] == GeminiTransportMode.REST_VERTEX_HEADER
 
 
 def test_generate_with_transport_chain_raises_when_all_fail() -> None:

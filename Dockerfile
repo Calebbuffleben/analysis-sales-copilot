@@ -1,24 +1,25 @@
+# Python audio / Live pipeline — Cloud Run / Docker Hub / local compose.
+#
+# Build (from this directory):
+#   docker build -t python-service .
+
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# Instalar dependências do sistema mínimas para streaming/diagnóstico de áudio
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copiar requirements e instalar dependências Python
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiar código fonte
 COPY proto/ ./proto/
 COPY src/ ./src/
-# Smoke test script (same as host: python test_gemini_verify.py)
 COPY test_gemini_verify.py .
+COPY test_gemini_live_spike.py .
 
-# Gerar código gRPC a partir do .proto
 RUN python -m grpc_tools.protoc \
     --proto_path=./proto \
     --python_out=./proto \
@@ -30,15 +31,16 @@ RUN python -m grpc_tools.protoc \
     --grpc_python_out=./proto \
     ./proto/feedback_ingestion.proto
 
-# Expor porta gRPC
-EXPOSE 50051
+ENV PORT=8080
+ENV GRPC_PORT=50051
+ENV METRICS_PORT=9100
+ENV DESKTOP_WS_ENABLED=true
 
-# Expor porta de métricas Prometheus
+# Cloud Run ingress (WSS + /health)
+EXPOSE 8080
+# Internal gRPC audio (fallback / phase 2)
+EXPOSE 50051
+# Prometheus metrics (internal)
 EXPOSE 9100
 
-# Expor gateway WebSocket direto do desktop (DESKTOP_WS_ENABLED=true).
-# Railway roteia o domínio público para PORT (tipicamente 8000).
-EXPOSE 8000
-
-# Comando para iniciar o servidor
 CMD ["python", "src/main.py"]

@@ -171,6 +171,25 @@ class DesktopWsGateway:
         finally:
             loop.close()
 
+    async def _process_request(self, *args: Any) -> Any:
+        """HTTP GET /health for Cloud Run probes (same PORT as WSS).
+
+        Supports websockets 12 ``(path, headers)`` and 13+ ``(connection, request)``.
+        """
+        from http import HTTPStatus
+
+        body = b'{"status":"ok"}\n'
+        if len(args) == 2 and not hasattr(args[0], 'respond'):
+            path = str(args[0] or '')
+            if path.split('?', 1)[0] in ('/health', '/healthz'):
+                return HTTPStatus.OK, [], body
+            return None
+        connection, request = args[0], args[1]
+        path = str(getattr(request, 'path', '') or '')
+        if path.split('?', 1)[0] in ('/health', '/healthz'):
+            return connection.respond(HTTPStatus.OK, body)
+        return None
+
     async def _serve(self) -> None:
         import websockets
 
@@ -180,6 +199,7 @@ class DesktopWsGateway:
             self._host,
             self._port,
             max_size=2 ** 20,
+            process_request=self._process_request,
         ):
             self._started.set()
             await self._stop_event.wait()

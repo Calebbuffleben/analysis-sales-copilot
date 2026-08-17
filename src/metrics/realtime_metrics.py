@@ -113,6 +113,37 @@ ANALYSIS_MS = _metric_or_noop(
     buckets=(5, 20, 50, 100, 200, 300, 500, 1000),
 )
 
+AUDIO_LLM_CALLS_TOTAL = _metric_or_noop(
+    Counter,
+    'audio_llm_calls_total',
+    'Total direct audio analysis calls made to the multimodal LLM.',
+)
+
+AUDIO_LLM_ERRORS_TOTAL = _metric_or_noop(
+    Counter,
+    'audio_llm_errors_total',
+    'Total direct audio analysis calls that failed.',
+)
+
+AUDIO_LLM_LATENCY_MS = _metric_or_noop(
+    Histogram,
+    'audio_llm_latency_ms',
+    'Multimodal audio analysis request latency (ms).',
+    buckets=(100, 250, 500, 1000, 2000, 4000, 8000, 15000),
+)
+
+AUDIO_LLM_INPUT_SECONDS_TOTAL = _metric_or_noop(
+    Counter,
+    'audio_llm_input_seconds_total',
+    'Total audio seconds sent to the multimodal LLM.',
+)
+
+AUDIO_LLM_SILENCE_SKIPPED_TOTAL = _metric_or_noop(
+    Counter,
+    'audio_llm_silence_skipped_total',
+    'Total silent audio windows skipped before multimodal analysis.',
+)
+
 PUBLISH_GRPC_MS = _metric_or_noop(
     Histogram,
     'publish_grpc_ms',
@@ -416,3 +447,158 @@ ACOUSTIC_ROUTING_SKIPPED_TOTAL = _metric_or_noop(
     ['reason'],
 )
 
+
+
+# --- Gemini Live (realtime) metrics ---
+
+LIVE_SESSIONS_OPEN = _metric_or_noop(
+    Gauge,
+    'live_sessions_open',
+    'Current open Gemini Live sessions.',
+)
+
+LIVE_SESSIONS_STARTED_TOTAL = _metric_or_noop(
+    Counter,
+    'live_sessions_started_total',
+    'Total Gemini Live sessions started.',
+)
+
+LIVE_SESSIONS_CLOSED_TOTAL = _metric_or_noop(
+    Counter,
+    'live_sessions_closed_total',
+    'Total Gemini Live sessions closed.',
+)
+
+LIVE_SESSIONS_RESUMED_TOTAL = _metric_or_noop(
+    Counter,
+    'live_sessions_resumed_total',
+    'Total Gemini Live session resumptions.',
+)
+
+LIVE_AUDIO_BYTES_SENT_TOTAL = _metric_or_noop(
+    Counter,
+    'live_audio_bytes_sent_total',
+    'Total PCM audio bytes sent to Gemini Live.',
+)
+
+LIVE_TOOL_CALLS_TOTAL = _metric_or_noop(
+    Counter,
+    'live_tool_calls_total',
+    'Total emit_feedback tool calls received from Gemini Live.',
+)
+
+LIVE_TOOL_CALLS_INVALID_TOTAL = _metric_or_noop(
+    Counter,
+    'live_tool_calls_invalid_total',
+    'Total emit_feedback tool calls rejected by validation.',
+)
+
+LIVE_TOOL_CALLS_DEDUPED_TOTAL = _metric_or_noop(
+    Counter,
+    'live_tool_calls_deduped_total',
+    'Total emit_feedback tool calls dropped by turnId dedupe.',
+)
+
+LIVE_UNEXPECTED_AUDIO_BYTES_TOTAL = _metric_or_noop(
+    Counter,
+    'live_unexpected_audio_bytes_total',
+    'Total unexpected audio output bytes discarded from Gemini Live.',
+)
+
+LIVE_VAD_END_TO_TOOL_CALL_MS = _metric_or_noop(
+    Histogram,
+    'live_vad_end_to_tool_call_ms',
+    'Wall time from speech end (activity_end) to emit_feedback tool call (ms).',
+    buckets=(50, 100, 200, 400, 600, 850, 1000, 1500, 3000, 5000),
+)
+
+LIVE_SPEECH_END_TO_WS_MS = _metric_or_noop(
+    Histogram,
+    'live_speech_end_to_ws_ms',
+    'Wall time from speech end to WS broadcast enqueue (ms).',
+    buckets=(50, 100, 200, 400, 600, 850, 1000, 1500, 3000, 5000),
+)
+
+LIVE_COST_USD_TOTAL = _metric_or_noop(
+    Counter,
+    'live_cost_usd_total',
+    'Estimated Gemini Live cost in USD (token-based).',
+)
+
+LIVE_COST_USD_PER_MEETING = _metric_or_noop(
+    Gauge,
+    'live_cost_usd_per_meeting',
+    'Estimated Gemini Live cost in USD for the most recently updated meeting.',
+)
+
+LIVE_COST_LIMIT_TRIPS_TOTAL = _metric_or_noop(
+    Counter,
+    'live_cost_limit_trips_total',
+    'Total times a Live session hit the per-meeting cost guardrail.',
+)
+
+LIVE_FALLBACK_TOTAL = _metric_or_noop(
+    Counter,
+    'live_fallback_total',
+    'Total times Live path fell back to generateContent multimodal.',
+)
+
+LANGGRAPH_NODE_MS = _metric_or_noop(
+    Histogram,
+    'langgraph_node_ms',
+    'LangGraph node execution latency in milliseconds.',
+    ('node',),
+    buckets=(0.1, 0.5, 1, 2, 5, 10, 20, 50, 100),
+)
+
+SPECIALIST_QUEUE_SIZE = _metric_or_noop(
+    Gauge,
+    'live_specialist_queue_size',
+    'Current number of queued Live specialist jobs.',
+)
+
+SPECIALIST_CALLS_TOTAL = _metric_or_noop(
+    Counter,
+    'live_specialist_calls_total',
+    'Total combined Live specialist Gemini calls started.',
+)
+
+SPECIALIST_ERRORS_TOTAL = _metric_or_noop(
+    Counter,
+    'live_specialist_errors_total',
+    'Total Live specialist failures and timeouts.',
+)
+
+SPECIALIST_DROPPED_TOTAL = _metric_or_noop(
+    Counter,
+    'live_specialist_dropped_total',
+    'Total Live specialist jobs or results dropped.',
+    ('reason',),
+)
+
+SPECIALIST_LATENCY_MS = _metric_or_noop(
+    Histogram,
+    'live_specialist_latency_ms',
+    'Combined Live specialist Gemini latency in milliseconds.',
+    buckets=(100, 250, 500, 1000, 2000, 3000, 5000, 8000, 15000),
+)
+
+SECONDARY_FEEDBACK_PUBLISHED_TOTAL = _metric_or_noop(
+    Counter,
+    'live_secondary_feedback_published_total',
+    'Total specialist secondary feedback events published.',
+)
+
+SECONDARY_FEEDBACK_SUPPRESSED_TOTAL = _metric_or_noop(
+    Counter,
+    'live_secondary_feedback_suppressed_total',
+    'Total specialist secondary feedback events suppressed.',
+    ('reason',),
+)
+
+SPEECH_END_TO_SECONDARY_WS_MS = _metric_or_noop(
+    Histogram,
+    'live_speech_end_to_secondary_ws_ms',
+    'Wall time from source speech end to secondary WS broadcast enqueue.',
+    buckets=(100, 250, 500, 1000, 2000, 3000, 5000, 8000, 15000),
+)

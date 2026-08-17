@@ -29,10 +29,12 @@ class BackendFeedbackClient:
         timeout_seconds: float = 5.0,
         service_token: Optional[str] = None,
         service_jwt_provider: Optional[ServiceJwtProvider] = None,
+        use_tls: bool = False,
     ) -> None:
         self._service_url = service_url
         self._enabled = enabled
         self._timeout_seconds = timeout_seconds
+        self._use_tls = use_tls
         # Service-to-service JWT. The backend requires a Bearer token for all
         # gRPC ingress calls; this one is minted with role=SERVICE and is
         # permitted to operate cross-tenant provided x-tenant-id is passed.
@@ -212,7 +214,14 @@ class BackendFeedbackClient:
         sys.path.insert(0, os.path.abspath(proto_dir))
         self._feedback_ingestion_pb2 = import_module('feedback_ingestion_pb2')
         self._feedback_ingestion_pb2_grpc = import_module('feedback_ingestion_pb2_grpc')
-        self._channel = grpc.insecure_channel(self._service_url)
+        if self._use_tls:
+            # Cloud Run / public HTTPS edge terminates TLS; use system roots.
+            self._channel = grpc.secure_channel(
+                self._service_url,
+                grpc.ssl_channel_credentials(),
+            )
+        else:
+            self._channel = grpc.insecure_channel(self._service_url)
         self._stub = self._feedback_ingestion_pb2_grpc.FeedbackIngestionServiceStub(
             self._channel,
         )

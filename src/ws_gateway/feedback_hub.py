@@ -15,6 +15,12 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Any, Optional
 
+from ..modules.playbooks.catalog_cache import PlaybookCatalogCache
+from ..modules.playbooks.resolve import (
+    parse_playbook_url_allowlist_env,
+    resolve_playbook_metadata,
+)
+
 if TYPE_CHECKING:
     from ..modules.backend_feedback.types import BackendFeedbackEvent
 
@@ -26,10 +32,17 @@ RoomKey = tuple[str, str]  # (tenant_id, meeting_id)
 class FeedbackHub:
     """Registry of desktop WS connections keyed by (tenantId, meetingId)."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        catalog_cache: Optional[PlaybookCatalogCache] = None,
+        playbook_url_allowlist: str = '',
+    ) -> None:
         self._lock = threading.Lock()
         self._rooms: dict[RoomKey, set[Any]] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._catalog_cache = catalog_cache
+        self._url_allowlist = parse_playbook_url_allowlist_env(playbook_url_allowlist)
 
     def attach_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
@@ -79,6 +92,7 @@ class FeedbackHub:
         if not connections:
             return False
 
+        started = time.perf_counter()
         payload = self._build_payload(event, direct_feedback)
         try:
             text = json.dumps(payload, ensure_ascii=False)
@@ -91,13 +105,22 @@ class FeedbackHub:
                 self._safe_send(connection, text),
                 loop,
             )
+        broadcast_ms = (time.perf_counter() - started) * 1000.0
+        speech_end = event.speech_end_ms or event.window_end_ms
+        speech_to_ws = max(0, int(time.time() * 1000) - int(speech_end or 0))
         logger.info(
             '⚡ ws feedback broadcast | tenantId=%s | meetingId=%s | subscribers=%s | '
-            'feedbackType=%s',
+            'feedbackType=%s | turnId=%s | speechEndToWsMs=%s | broadcastSchedMs=%.1f | '
+            'traceId=%s | hasPlaybook=%s',
             event.tenant_id,
             event.meeting_id,
             len(connections),
             event.analysis.feedback_type,
+            event.turn_id or '',
+            speech_to_ws,
+            broadcast_ms,
+            event.feedback_trace_id or '',
+            bool(payload.get('payload', {}).get('metadata', {}).get('playbook')),
         )
         return True
 
@@ -109,8 +132,8 @@ class FeedbackHub:
             # Connection cleanup happens in the gateway handler on close.
             logger.debug('ws feedback send failed (client gone?)', exc_info=True)
 
-    @staticmethod
     def _build_payload(
+        self,
         event: 'BackendFeedbackEvent',
         direct_feedback: str,
     ) -> dict[str, Any]:
@@ -124,8 +147,47 @@ class FeedbackHub:
         }
         if analysis.feedback_type:
             metadata['feedbackType'] = analysis.feedback_type
-        if (analysis.playbook_hint_json or '').strip():
-            metadata['playbookHintJson'] = analysis.playbook_hint_json
+        hint = (analysis.playbook_hint_json or '').strip()
+        if hint:
+            metadata['playbookHintJson'] = hint
+            # In-memory resolve only — never HTTP/DB on the WS hot path.
+            if self._catalog_cache is not None and event.tenant_id:
+                try:
+                    by_key = self._catalog_cache.get_by_key(
+                        event.tenant_id,
+                        hot_path=True,
+                    )
+                    playbook = resolve_playbook_metadata(
+                        templates_by_key=by_key,
+                        playbook_hint_json=hint,
+                        url_allowlist=self._url_allowlist,
+                    )
+                    if playbook:
+                        metadata['playbook'] = playbook
+                except Exception:
+                    logger.exception(
+                        'playbook.resolve_failed | tenant=%s | meeting=%s',
+                        event.tenant_id,
+                        event.meeting_id,
+                    )
+        if event.turn_id:
+            metadata['turnId'] = event.turn_id
+        speech_end = event.speech_end_ms or event.window_end_ms
+        if speech_end:
+            metadata['speechEndMs'] = int(speech_end)
+            metadata['speechAnchorMs'] = int(speech_end)
+        if event.feedback_trace_id:
+            metadata['feedbackTraceId'] = event.feedback_trace_id
+        metadata.update(event.metadata)
+        prosody_raw = (getattr(analysis, 'prosody_json', None) or '').strip()
+        if prosody_raw:
+            try:
+                metadata['prosody'] = json.loads(prosody_raw)
+            except json.JSONDecodeError:
+                logger.debug(
+                    'prosody_json invalid | meeting=%s',
+                    event.meeting_id,
+                )
 
         return {
             'type': 'feedback',

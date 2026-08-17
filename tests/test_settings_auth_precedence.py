@@ -50,6 +50,34 @@ def test_assemblyai_provider_validates_with_api_key() -> None:
     settings.validate()
 
 
+def test_multimodal_mode_bypasses_assemblyai_key_requirement() -> None:
+    settings = Settings(
+        grpc_feedback_enabled=False,
+        audio_analysis_mode='multimodal',
+        stt_provider='assemblyai',
+        assemblyai_api_key=None,
+        llm_provider='gemini',
+        gemini_api_key='test-key',
+    )
+
+    settings.validate()
+
+
+def test_multimodal_mode_requires_gemini() -> None:
+    settings = Settings(
+        grpc_feedback_enabled=False,
+        audio_analysis_mode='multimodal',
+        llm_provider='ollama',
+    )
+
+    try:
+        settings.validate()
+    except ValueError as exc:
+        assert 'requires LLM_PROVIDER=gemini' in str(exc)
+    else:
+        raise AssertionError('Expected multimodal mode with Ollama to fail validation')
+
+
 def test_gemini_provider_requires_at_least_one_api_key() -> None:
     settings = Settings(
         grpc_feedback_enabled=False,
@@ -105,6 +133,12 @@ def test_gemini_validate_accepts_keys_without_format_prefix_check() -> None:
     )
 
     settings.validate()
+
+
+def test_gemini_api_keys_strips_wrapping_quotes(monkeypatch) -> None:
+    monkeypatch.setenv('GEMINI_API_KEYS', '"key-a,key-b"')
+    settings = Settings.from_env()
+    assert settings.gemini_api_keys == ('key-a', 'key-b')
 
 
 def test_gemini_api_keys_rejects_empty_entries(monkeypatch) -> None:

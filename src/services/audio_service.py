@@ -1,13 +1,16 @@
 """Service for processing audio chunks."""
 
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from ..modules.audio_buffer.service import AudioBufferService
 from ..modules.transcription.assemblyai_streaming_provider import (
     AssemblyAiStreamingProvider,
 )
 from .stream_service import StreamService, StreamStats
+
+if TYPE_CHECKING:
+    from ..modules.text_analysis.gemini_live_session import GeminiLiveManager
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +23,7 @@ class AudioService:
         stream_service: Optional[StreamService] = None,
         audio_buffer_service: Optional[AudioBufferService] = None,
         streaming_stt_provider: Optional[AssemblyAiStreamingProvider] = None,
+        live_manager: Optional['GeminiLiveManager'] = None,
     ):
         """
         Initialize the audio service.
@@ -30,10 +34,7 @@ class AudioService:
         self.stream_service = stream_service or StreamService()
         self.audio_buffer_service = audio_buffer_service
         self.streaming_stt_provider = streaming_stt_provider
-        # TODO: Inject here, via dependency injection or factory:
-        # - SlidingWindowWorker: já encapsulado dentro de AudioBufferService.
-        # - TranscriptionPipelineService: serviço de nível mais alto que registra
-        #   um callback no SlidingWindowWorker e orquestra STT + análise de texto.
+        self.live_manager = live_manager
 
     def start_stream(
         self,
@@ -102,6 +103,25 @@ class AudioService:
                 f"duration={stats.duration_seconds:.2f}s"
             )
 
+        # Gemini Live: client audio only. Host stays on windowed buffer path.
+        role = str(participant_role or '').strip().lower()
+        acoustic = str(acoustic_class or '').strip().lower()
+        is_client = role != 'host' and acoustic != 'seller'
+        if self.live_manager and stats and is_client:
+            handled = self.live_manager.push_audio(
+                meeting_id=meeting_id,
+                tenant_id=tenant_id,
+                participant_id=participant_id,
+                participant_role=participant_role,
+                track=track,
+                wav_or_pcm=wav_data,
+                timestamp_ms=timestamp_ms,
+                sample_rate=stats.sample_rate,
+                channels=stats.channels,
+            )
+            if handled:
+                return
+
         if self.audio_buffer_service and stats:
             self.audio_buffer_service.push(
                 stream_key=stats.key,
@@ -168,6 +188,12 @@ class AudioService:
             self.streaming_stt_provider.end_stream(stream_key)
         if self.audio_buffer_service:
             self.audio_buffer_service.end_stream(stream_key)
+        if self.live_manager and track != 'microphone':
+            # Ceiling: one Live session per meeting; close when client tab-audio ends.
+            try:
+                self.live_manager.end_meeting(meeting_id)
+            except Exception:
+                logger.exception('Live end_meeting failed | meeting=%s', meeting_id)
 
         return self.stream_service.end_stream(
             meeting_id=meeting_id,

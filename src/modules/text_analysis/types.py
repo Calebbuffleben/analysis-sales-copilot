@@ -33,6 +33,8 @@ class TextAnalysisResult:
     mean_rms_dbfs: Optional[float] = None
     # JSON for gRPC AnalysisPayload.playbook_hint_json (template key + variables).
     playbook_hint_json: str = ""
+    # Live-path enrichment only (not in gRPC AnalysisPayload); WS metadata.prosody.
+    prosody_json: str = ""
 
     def to_payload_dict(self) -> Dict[str, Any]:
         """Convert the analysis result to a payload-friendly dict."""
@@ -52,5 +54,7 @@ class TextAnalysisResult:
             payload['mean_rms_dbfs'] = self.mean_rms_dbfs
         if (self.playbook_hint_json or '').strip():
             payload['playbook_hint_json'] = self.playbook_hint_json
+        if (self.prosody_json or '').strip():
+            payload['prosody_json'] = self.prosody_json
 
         return payload

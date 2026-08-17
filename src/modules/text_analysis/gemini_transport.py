@@ -28,7 +28,7 @@ def rest_generation_config(*, json_mode: bool) -> dict[str, Any]:
     return config
 
 
-def sdk_generation_config(*, json_mode: bool) -> Any:
+def sdk_generation_config(*, json_mode: bool, response_schema: Any = None) -> Any:
     """SDK GenerateContentConfig with thinking disabled."""
     from google.genai import types
 
@@ -39,6 +39,8 @@ def sdk_generation_config(*, json_mode: bool) -> Any:
     }
     if json_mode:
         kwargs['response_mime_type'] = 'application/json'
+    if response_schema is not None:
+        kwargs['response_schema'] = response_schema
     return types.GenerateContentConfig(**kwargs)
 
 
@@ -63,22 +65,32 @@ _AI_STUDIO_TRANSPORTS = (
     GeminiTransportMode.REST_DEVELOPER_QUERY,
     GeminiTransportMode.SDK_DEVELOPER,
 )
+_VERTEX_EXPRESS_TRANSPORTS = (
+    GeminiTransportMode.SDK_VERTEX_EXPRESS,
+    GeminiTransportMode.REST_VERTEX_HEADER,
+    GeminiTransportMode.REST_VERTEX_QUERY,
+)
 
 
-def uses_ai_studio_api_key(api_key: str) -> bool:
-    """True for Google AI Studio keys (``AQ.…``) — Generative Language API only."""
+def uses_vertex_express_api_key(api_key: str) -> bool:
+    """Return whether a key uses Vertex AI express mode."""
     return (api_key or '').strip().startswith('AQ.')
 
 
+def uses_ai_studio_api_key(api_key: str) -> bool:
+    return not uses_vertex_express_api_key(api_key)
+
+
 def is_mode_valid_for_key(mode: GeminiTransportMode, api_key: str) -> bool:
-    """AQ. keys must not hit Vertex; standard API keys use Developer API only."""
-    if uses_ai_studio_api_key(api_key):
-        return mode in _AI_STUDIO_TRANSPORTS
+    if uses_vertex_express_api_key(api_key):
+        return mode in _VERTEX_EXPRESS_TRANSPORTS
     return mode in _AI_STUDIO_TRANSPORTS
 
 
 def transport_candidates(api_key: str) -> tuple[GeminiTransportMode, ...]:
-    """Ordered transports to try (Generative Language API / AI Studio paths only)."""
+    """Return transports compatible with the API-key issuer."""
+    if uses_vertex_express_api_key(api_key):
+        return _VERTEX_EXPRESS_TRANSPORTS
     return _AI_STUDIO_TRANSPORTS
 
 

@@ -12,6 +12,8 @@ class Settings:
     grpc_port: int = 50051
     grpc_workers: int = 10
     grpc_feedback_url: str = 'localhost:50052'
+    # True when calling Nest via public HTTPS edge (Cloud Run + Envoy).
+    grpc_feedback_use_tls: bool = False
     grpc_feedback_enabled: bool = True
     grpc_feedback_timeout_seconds: float = 5.0
     # Backend service JWT (role=SERVICE) — required for multi-tenant ingress.
@@ -23,6 +25,7 @@ class Settings:
     service_token_mint_ttl_seconds: int = 3600
     service_token_mint_retries: int = 4
     service_token_mint_backoff_seconds: float = 1.0
+    playbook_url_allowlist: str = ''
     storage_dir: str = '/app/storage'
     audio_buffer_window_seconds: float = 10.0
     audio_buffer_min_window_seconds: float = 4.0
@@ -37,6 +40,33 @@ class Settings:
     # STT provider: `assemblyai` is the streaming cloud provider; `local` keeps
     # the legacy faster-whisper path available during rollout.
     stt_provider: str = 'local'
+    # `multimodal` sends bounded PCM windows directly to Gemini. `transcript`
+    # preserves AssemblyAI/local STT as a rollback path. `live` uses Gemini Live
+    # for client audio (sub-second best-effort) with multimodal as degraded fallback.
+    audio_analysis_mode: str = 'transcript'
+    audio_analysis_client_interval_ms: int = 7000
+    audio_analysis_host_interval_ms: int = 20000
+    audio_analysis_overlap_ms: int = 750
+    # Gemini Live guardrails / tuning
+    live_model: str = 'gemini-3.1-flash-live-preview'
+    live_silence_duration_ms: int = 250
+    live_min_speech_ms: int = 400
+    live_max_cost_usd_per_meeting: float = 3.0
+    live_alert_cost_usd: float = 1.0
+    live_max_concurrent_sessions: int = 20
+    live_context_window_tokens: int = 12_000
+    live_session_rotation_minutes: float = 2.0
+    live_host_observe_interval_ms: int = 15_000
+    live_langgraph_enabled: bool = True
+    live_specialist_enabled: bool = False
+    live_specialist_model: str = 'gemini-2.5-flash'
+    live_specialist_queue_max_size: int = 32
+    live_specialist_timeout_ms: int = 8_000
+    live_specialist_cooldown_ms: int = 15_000
+    live_specialist_min_confidence: float = 0.7
+    live_specialist_max_age_ms: int = 120_000
+    live_secondary_feedback_enabled: bool = True
+    live_secondary_feedback_types: tuple[str, ...] = ('risk', 'objection')
     assemblyai_api_key: Optional[str] = None
     assemblyai_api_host: str = 'streaming.assemblyai.com'
     assemblyai_speech_model: str = 'u3-rt-pro'
@@ -82,8 +112,7 @@ class Settings:
     publish_retry_limit: int = 1
     publish_retry_backoff_ms: int = 200
     # Direct desktop WebSocket gateway (backend bypass on the critical path).
-    # Binds to PORT (Railway public port, typically 8000) — same port the
-    # platform routes wss://*.up.railway.app to. gRPC stays on GRPC_PORT.
+    # Binds to PORT (Cloud Run / platform public port). gRPC stays on GRPC_PORT.
     desktop_ws_enabled: bool = False
     port: int = 8765
     desktop_ws_coalesce_ms: int = 100
@@ -124,20 +153,23 @@ class Settings:
     @classmethod
     def from_env(cls) -> 'Settings':
         """Create settings from environment variables."""
-        # Backend gRPC ingress is plain (insecure) on 50052. On Railway, reach it via
-        # private DNS: <backend-service>.railway.internal:50052 — not https://*.up.railway.app
-        default_grpc_feedback_url = (
-            'backend-analysis-production.railway.internal:50052'
-            if os.getenv('RAILWAY_SERVICE_NAME')
-            else 'localhost:50052'
+        # Local/dev: localhost:50052 (plain). Cloud Run: set
+        # GRPC_FEEDBACK_URL=https://<meet-backend.run.app> (TLS at edge → Envoy → Nest).
+        feedback_raw = os.getenv('GRPC_FEEDBACK_URL', 'localhost:50052')
+        grpc_feedback_url, grpc_feedback_use_tls = cls._normalize_grpc_target(
+            feedback_raw,
         )
-        feedback_raw = os.getenv('GRPC_FEEDBACK_URL', default_grpc_feedback_url)
-        grpc_feedback_url = cls._normalize_grpc_target(feedback_raw)
+        tls_override = (os.getenv('GRPC_FEEDBACK_USE_TLS') or '').strip().lower()
+        if tls_override == 'true':
+            grpc_feedback_use_tls = True
+        elif tls_override == 'false':
+            grpc_feedback_use_tls = False
 
         return cls(
             grpc_port=int(os.getenv('GRPC_PORT', '50051')),
             grpc_workers=int(os.getenv('GRPC_WORKERS', '10')),
             grpc_feedback_url=grpc_feedback_url,
+            grpc_feedback_use_tls=grpc_feedback_use_tls,
             grpc_feedback_enabled=os.getenv('GRPC_FEEDBACK_ENABLED', 'true').lower() == 'true',
             grpc_feedback_timeout_seconds=float(
                 os.getenv('GRPC_FEEDBACK_TIMEOUT_SECONDS', '5.0'),
@@ -164,6 +196,9 @@ class Settings:
                 0.0,
                 float(os.getenv('SERVICE_TOKEN_MINT_BACKOFF_SECONDS', '1.0')),
             ),
+            playbook_url_allowlist=(
+                os.getenv('PLAYBOOK_URL_ALLOWLIST') or ''
+            ).strip(),
             storage_dir=os.getenv('STORAGE_DIR', '/app/storage'),
             audio_buffer_window_seconds=float(
                 os.getenv('AUDIO_BUFFER_WINDOW_SECONDS', '10.0'),
@@ -194,6 +229,86 @@ class Settings:
                 os.getenv('WHISPER_DEFAULT_LANGUAGE'),
             ),
             stt_provider=os.getenv('STT_PROVIDER', 'assemblyai').strip().lower(),
+            audio_analysis_mode=os.getenv(
+                'AUDIO_ANALYSIS_MODE',
+                'transcript',
+            ).strip().lower(),
+            audio_analysis_client_interval_ms=int(
+                os.getenv('AUDIO_ANALYSIS_CLIENT_INTERVAL_MS', '7000'),
+            ),
+            audio_analysis_host_interval_ms=int(
+                os.getenv('AUDIO_ANALYSIS_HOST_INTERVAL_MS', '20000'),
+            ),
+            audio_analysis_overlap_ms=int(
+                os.getenv('AUDIO_ANALYSIS_OVERLAP_MS', '750'),
+            ),
+            live_model=os.getenv(
+                'LIVE_MODEL',
+                'gemini-3.1-flash-live-preview',
+            ).strip()
+            or 'gemini-3.1-flash-live-preview',
+            live_silence_duration_ms=int(
+                os.getenv('LIVE_SILENCE_DURATION_MS', '250'),
+            ),
+            live_min_speech_ms=int(
+                os.getenv('LIVE_MIN_SPEECH_MS', '400'),
+            ),
+            live_max_cost_usd_per_meeting=float(
+                os.getenv('LIVE_MAX_COST_USD_PER_MEETING', '3.0'),
+            ),
+            live_alert_cost_usd=float(
+                os.getenv('LIVE_ALERT_COST_USD', '1.0'),
+            ),
+            live_max_concurrent_sessions=int(
+                os.getenv('LIVE_MAX_CONCURRENT_SESSIONS', '20'),
+            ),
+            live_context_window_tokens=int(
+                os.getenv('LIVE_CONTEXT_WINDOW_TOKENS', '12000'),
+            ),
+            live_session_rotation_minutes=float(
+                os.getenv('LIVE_SESSION_ROTATION_MINUTES', '2.0'),
+            ),
+            live_host_observe_interval_ms=int(
+                os.getenv('LIVE_HOST_OBSERVE_INTERVAL_MS', '15000'),
+            ),
+            live_langgraph_enabled=os.getenv(
+                'LIVE_LANGGRAPH_ENABLED',
+                'true',
+            ).lower()
+            == 'true',
+            live_specialist_enabled=os.getenv(
+                'LIVE_SPECIALIST_ENABLED',
+                'false',
+            ).lower()
+            == 'true',
+            live_specialist_model=os.getenv(
+                'LIVE_SPECIALIST_MODEL',
+                os.getenv('GEMINI_MODEL', 'gemini-2.5-flash'),
+            ).strip()
+            or 'gemini-2.5-flash',
+            live_specialist_queue_max_size=int(
+                os.getenv('LIVE_SPECIALIST_QUEUE_MAX_SIZE', '32'),
+            ),
+            live_specialist_timeout_ms=int(
+                os.getenv('LIVE_SPECIALIST_TIMEOUT_MS', '8000'),
+            ),
+            live_specialist_cooldown_ms=int(
+                os.getenv('LIVE_SPECIALIST_COOLDOWN_MS', '15000'),
+            ),
+            live_specialist_min_confidence=float(
+                os.getenv('LIVE_SPECIALIST_MIN_CONFIDENCE', '0.7'),
+            ),
+            live_specialist_max_age_ms=int(
+                os.getenv('LIVE_SPECIALIST_MAX_AGE_MS', '120000'),
+            ),
+            live_secondary_feedback_enabled=os.getenv(
+                'LIVE_SECONDARY_FEEDBACK_ENABLED',
+                'true',
+            ).lower()
+            == 'true',
+            live_secondary_feedback_types=cls._parse_csv(
+                os.getenv('LIVE_SECONDARY_FEEDBACK_TYPES', 'risk,objection'),
+            ),
             assemblyai_api_key=(os.getenv('ASSEMBLYAI_API_KEY') or '').strip() or None,
             assemblyai_api_host=os.getenv(
                 'ASSEMBLYAI_API_HOST',
@@ -318,7 +433,10 @@ class Settings:
             ollama_base_url=os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434'),
             ollama_model=os.getenv('OLLAMA_MODEL', 'llama3.1:8b'),
             ollama_timeout=int(os.getenv('OLLAMA_TIMEOUT', '30')),
-            gemini_api_key=(os.getenv('GEMINI_API_KEY') or '').strip() or None,
+            gemini_api_key=(
+                (os.getenv('GEMINI_API_KEY') or '').strip().strip('"').strip("'")
+                or None
+            ),
             gemini_api_keys=cls._parse_csv(os.getenv('GEMINI_API_KEYS')),
             gemini_model=os.getenv('GEMINI_MODEL', 'gemini-2.5-flash'),
             gemini_rpm_limit=int(os.getenv('GEMINI_RPM_LIMIT', '12')),
@@ -327,16 +445,27 @@ class Settings:
         )
 
     @staticmethod
-    def _normalize_grpc_target(raw: str) -> str:
-        """Strip http(s):// for grpc.insecure_channel (host:port only)."""
+    def _normalize_grpc_target(raw: str) -> tuple[str, bool]:
+        """Return (host:port, use_tls) for the feedback gRPC client."""
         if not raw:
-            return raw
+            return raw, False
         u = raw.strip()
         if u.startswith('https://'):
-            return u[8:].split('/', 1)[0]
+            host = u[8:].split('/', 1)[0]
+            if ':' not in host:
+                host = f'{host}:443'
+            return host, True
         if u.startswith('http://'):
-            return u[7:].split('/', 1)[0]
-        return u
+            host = u[7:].split('/', 1)[0]
+            if ':' not in host:
+                host = f'{host}:80'
+            return host, False
+        # host:port
+        last_colon = u.rfind(':')
+        port = u[last_colon + 1 :] if last_colon > 0 else ''
+        if port == '443':
+            return u, True
+        return u, False
 
     @staticmethod
     def _normalize_language(raw: Optional[str]) -> Optional[str]:
@@ -361,7 +490,14 @@ class Settings:
     def _parse_csv(raw: Optional[str]) -> tuple[str, ...]:
         if raw is None or not raw.strip():
             return ()
-        parts = [part.strip() for part in raw.split(',')]
+        cleaned = raw.strip()
+        if (
+            len(cleaned) >= 2
+            and cleaned[0] == cleaned[-1]
+            and cleaned[0] in {'"', "'"}
+        ):
+            cleaned = cleaned[1:-1]
+        parts = [part.strip().strip('"').strip("'") for part in cleaned.split(',')]
         if any(not part for part in parts):
             raise ValueError('Gemini API key list contains empty entries.')
         return tuple(parts)
@@ -454,7 +590,59 @@ class Settings:
                 f'Invalid STT_PROVIDER: {self.stt_provider}. '
                 'Expected "assemblyai" or "local".',
             )
-        if self.stt_provider == 'assemblyai':
+        if self.audio_analysis_mode not in {'transcript', 'multimodal', 'live'}:
+            raise ValueError(
+                f'Invalid AUDIO_ANALYSIS_MODE: {self.audio_analysis_mode}. '
+                'Expected "transcript", "multimodal", or "live".',
+            )
+        if self.audio_analysis_client_interval_ms < 1000:
+            raise ValueError('AUDIO_ANALYSIS_CLIENT_INTERVAL_MS must be >= 1000.')
+        if self.audio_analysis_host_interval_ms < 1000:
+            raise ValueError('AUDIO_ANALYSIS_HOST_INTERVAL_MS must be >= 1000.')
+        if self.audio_analysis_overlap_ms < 0:
+            raise ValueError('AUDIO_ANALYSIS_OVERLAP_MS must be >= 0.')
+        if self.audio_analysis_mode in {'multimodal', 'live'} and self.llm_provider != 'gemini':
+            raise ValueError(
+                f'AUDIO_ANALYSIS_MODE={self.audio_analysis_mode} requires LLM_PROVIDER=gemini.',
+            )
+        if self.audio_analysis_mode == 'live':
+            if self.live_silence_duration_ms < 50:
+                raise ValueError('LIVE_SILENCE_DURATION_MS must be >= 50.')
+            if self.live_min_speech_ms < 0:
+                raise ValueError('LIVE_MIN_SPEECH_MS must be >= 0.')
+            if self.live_max_cost_usd_per_meeting <= 0:
+                raise ValueError('LIVE_MAX_COST_USD_PER_MEETING must be > 0.')
+            if self.live_alert_cost_usd < 0:
+                raise ValueError('LIVE_ALERT_COST_USD must be >= 0.')
+            if self.live_max_concurrent_sessions < 1:
+                raise ValueError('LIVE_MAX_CONCURRENT_SESSIONS must be >= 1.')
+            if self.live_context_window_tokens < 1000:
+                raise ValueError('LIVE_CONTEXT_WINDOW_TOKENS must be >= 1000.')
+            if self.live_session_rotation_minutes <= 0:
+                raise ValueError('LIVE_SESSION_ROTATION_MINUTES must be > 0.')
+            if self.live_host_observe_interval_ms < 0:
+                raise ValueError('LIVE_HOST_OBSERVE_INTERVAL_MS must be >= 0.')
+            if self.live_specialist_queue_max_size < 1:
+                raise ValueError('LIVE_SPECIALIST_QUEUE_MAX_SIZE must be >= 1.')
+            if self.live_specialist_timeout_ms < 100:
+                raise ValueError('LIVE_SPECIALIST_TIMEOUT_MS must be >= 100.')
+            if self.live_specialist_cooldown_ms < 0:
+                raise ValueError('LIVE_SPECIALIST_COOLDOWN_MS must be >= 0.')
+            if not 0.0 <= self.live_specialist_min_confidence <= 1.0:
+                raise ValueError(
+                    'LIVE_SPECIALIST_MIN_CONFIDENCE must be between 0 and 1.',
+                )
+            if self.live_specialist_max_age_ms < 100:
+                raise ValueError('LIVE_SPECIALIST_MAX_AGE_MS must be >= 100.')
+            invalid_secondary_types = set(self.live_secondary_feedback_types) - {
+                'risk',
+                'objection',
+            }
+            if invalid_secondary_types:
+                raise ValueError(
+                    'LIVE_SECONDARY_FEEDBACK_TYPES supports only risk,objection.',
+                )
+        if self.audio_analysis_mode == 'transcript' and self.stt_provider == 'assemblyai':
             if not (self.assemblyai_api_key or '').strip():
                 raise ValueError(
                     'STT_PROVIDER=assemblyai requires ASSEMBLYAI_API_KEY.',

@@ -175,7 +175,11 @@ class OllamaAnalyzer:
                 'direct_feedback': validated.direct_feedback,
                 'confidence': validated.confidence,
                 'feedback_type': validated.feedback_type,
-                'conversation_state': validated.estado.to_dict(),
+                'conversation_state': (
+                    raw_data.get('estado')
+                    if isinstance(raw_data.get('estado'), dict)
+                    else {}
+                ),
                 'playbook_template_key': validated.playbook_template_key,
                 'playbook_variables': dict(validated.playbook_variables),
             }
@@ -213,7 +217,7 @@ class OllamaAnalyzer:
             'direct_feedback': '',
             'confidence': 0.0,
             'feedback_type': None,
-            'conversation_state': state,
+            'conversation_state': {},
             'playbook_template_key': None,
             'playbook_variables': {},
         }
