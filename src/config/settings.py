@@ -12,6 +12,8 @@ class Settings:
     grpc_port: int = 50051
     grpc_workers: int = 10
     grpc_feedback_url: str = 'localhost:50052'
+    # True when calling Nest via public HTTPS edge (Cloud Run + Envoy).
+    grpc_feedback_use_tls: bool = False
     grpc_feedback_enabled: bool = True
     grpc_feedback_timeout_seconds: float = 5.0
     # Backend service JWT (role=SERVICE) — required for multi-tenant ingress.
@@ -110,8 +112,7 @@ class Settings:
     publish_retry_limit: int = 1
     publish_retry_backoff_ms: int = 200
     # Direct desktop WebSocket gateway (backend bypass on the critical path).
-    # Binds to PORT (Railway public port, typically 8000) — same port the
-    # platform routes wss://*.up.railway.app to. gRPC stays on GRPC_PORT.
+    # Binds to PORT (Cloud Run / platform public port). gRPC stays on GRPC_PORT.
     desktop_ws_enabled: bool = False
     port: int = 8765
     desktop_ws_coalesce_ms: int = 100
@@ -152,20 +153,23 @@ class Settings:
     @classmethod
     def from_env(cls) -> 'Settings':
         """Create settings from environment variables."""
-        # Backend gRPC ingress is plain (insecure) on 50052. On Railway, reach it via
-        # private DNS: <backend-service>.railway.internal:50052 — not https://*.up.railway.app
-        default_grpc_feedback_url = (
-            'backend-analysis-production.railway.internal:50052'
-            if os.getenv('RAILWAY_SERVICE_NAME')
-            else 'localhost:50052'
+        # Local/dev: localhost:50052 (plain). Cloud Run: set
+        # GRPC_FEEDBACK_URL=https://<meet-backend.run.app> (TLS at edge → Envoy → Nest).
+        feedback_raw = os.getenv('GRPC_FEEDBACK_URL', 'localhost:50052')
+        grpc_feedback_url, grpc_feedback_use_tls = cls._normalize_grpc_target(
+            feedback_raw,
         )
-        feedback_raw = os.getenv('GRPC_FEEDBACK_URL', default_grpc_feedback_url)
-        grpc_feedback_url = cls._normalize_grpc_target(feedback_raw)
+        tls_override = (os.getenv('GRPC_FEEDBACK_USE_TLS') or '').strip().lower()
+        if tls_override == 'true':
+            grpc_feedback_use_tls = True
+        elif tls_override == 'false':
+            grpc_feedback_use_tls = False
 
         return cls(
             grpc_port=int(os.getenv('GRPC_PORT', '50051')),
             grpc_workers=int(os.getenv('GRPC_WORKERS', '10')),
             grpc_feedback_url=grpc_feedback_url,
+            grpc_feedback_use_tls=grpc_feedback_use_tls,
             grpc_feedback_enabled=os.getenv('GRPC_FEEDBACK_ENABLED', 'true').lower() == 'true',
             grpc_feedback_timeout_seconds=float(
                 os.getenv('GRPC_FEEDBACK_TIMEOUT_SECONDS', '5.0'),
@@ -441,16 +445,27 @@ class Settings:
         )
 
     @staticmethod
-    def _normalize_grpc_target(raw: str) -> str:
-        """Strip http(s):// for grpc.insecure_channel (host:port only)."""
+    def _normalize_grpc_target(raw: str) -> tuple[str, bool]:
+        """Return (host:port, use_tls) for the feedback gRPC client."""
         if not raw:
-            return raw
+            return raw, False
         u = raw.strip()
         if u.startswith('https://'):
-            return u[8:].split('/', 1)[0]
+            host = u[8:].split('/', 1)[0]
+            if ':' not in host:
+                host = f'{host}:443'
+            return host, True
         if u.startswith('http://'):
-            return u[7:].split('/', 1)[0]
-        return u
+            host = u[7:].split('/', 1)[0]
+            if ':' not in host:
+                host = f'{host}:80'
+            return host, False
+        # host:port
+        last_colon = u.rfind(':')
+        port = u[last_colon + 1 :] if last_colon > 0 else ''
+        if port == '443':
+            return u, True
+        return u, False
 
     @staticmethod
     def _normalize_language(raw: Optional[str]) -> Optional[str]:

@@ -282,6 +282,7 @@ def create_server(config: Settings) -> grpc.Server:
         if service_jwt_provider is None
         else None,
         service_jwt_provider=service_jwt_provider,
+        use_tls=config.grpc_feedback_use_tls,
     )
     # Direct desktop feedback hub: broadcasts locally BEFORE the backend
     # gRPC publish; backend stays in the loop for persistence/dashboard only.
@@ -546,6 +547,11 @@ def create_server(config: Settings) -> grpc.Server:
             coalesce_ms=config.desktop_ws_coalesce_ms,
         )
         desktop_ws_gateway.start()
+    else:
+        # Cloud Run probes PORT; when WSS gateway is off, expose /health alone.
+        from ..health_http import start_health_http
+
+        start_health_http('0.0.0.0', config.port)
 
     servicer = AudioPipelineServicer(audio_service)
 
