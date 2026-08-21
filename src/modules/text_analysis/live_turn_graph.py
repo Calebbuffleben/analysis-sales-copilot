@@ -29,6 +29,7 @@ class LiveTurnState(TypedDict, total=False):
     publish_fn: Callable[[Any], bool]
     prosody: Any
     published: bool
+    specialist_enqueue_fn: Callable[[], bool]
 
 
 def _timed(node: str, fn: Callable[[LiveTurnState], dict[str, Any]]):
@@ -71,9 +72,11 @@ class LiveTurnGraphs:
         post = StateGraph(LiveTurnState)
         post.add_node('merge_prosody', self._merge_prosody)
         post.add_node('publish_primary', self._publish_primary)
+        post.add_node('fanout_specialists', self._fanout_specialists)
         post.add_edge(START, 'merge_prosody')
         post.add_edge('merge_prosody', 'publish_primary')
-        post.add_edge('publish_primary', END)
+        post.add_edge('publish_primary', 'fanout_specialists')
+        post.add_edge('fanout_specialists', END)
         self.post_tool = post.compile()
 
     @staticmethod
@@ -136,6 +139,14 @@ class LiveTurnGraphs:
             LANGGRAPH_NODE_MS.labels(node='publish_primary').observe(
                 (time.perf_counter() - started) * 1000.0,
             )
+
+    @staticmethod
+    async def _fanout_specialists(state: LiveTurnState) -> dict[str, Any]:
+        enqueue = state.get('specialist_enqueue_fn')
+        if enqueue is None or not state.get('published'):
+            return {}
+        enqueue()
+        return {}
 
     async def run_pre_tool(self, state: LiveTurnState) -> LiveTurnState:
         return await self.pre_tool.ainvoke(state)

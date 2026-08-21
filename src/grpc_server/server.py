@@ -4,19 +4,12 @@ import logging
 import os
 import signal
 import sys
-import time
 from concurrent import futures
 from typing import Optional
 
 import grpc
 
-# Add proto directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'proto'))
-
-import audio_pipeline_pb2_grpc
-
-from ..config.settings import Settings, get_settings
-from ..handlers.audio_handler import AudioPipelineServicer
+from ..config.settings import Settings
 from ..modules.audio_buffer.service import AudioBufferService
 from ..modules.audio_buffer.sliding_worker import SlidingWindowWorker
 from ..modules.backend_feedback.grpc_feedback_client import BackendFeedbackClient
@@ -25,32 +18,19 @@ from ..modules.backend_feedback.service_jwt_provider import ServiceJwtProvider
 from ..modules.text_analysis.text_analysis_service import TextAnalysisService
 from ..modules.text_analysis.gemini_live_session import GeminiLiveManager
 from ..modules.text_analysis.live_feedback_publisher import LiveFeedbackPublisher
-from ..modules.text_analysis.live_specialist import (
-    GeminiSpecialistAnalyzer,
-    LiveSpecialistRunner,
-)
+from ..modules.specialists import SpecialistCatalog, SpecialistFanout
 from ..modules.text_analysis.live_turn_graph import LiveTurnGraphs
 from ..modules.playbooks.catalog_cache import PlaybookCatalogCache
-from ..feedback_trace import make_feedback_trace_id
-from ..modules.transcription.assemblyai_streaming_provider import (
-    AssemblyAiStreamConfig,
-    AssemblyAiStreamingProvider,
-)
-from ..modules.transcription.partial_turn_coordinator import (
-    PartialTurnConfig,
-    PartialTurnCoordinator,
-)
 from ..modules.transcription.ready_window_dispatcher import ReadyWindowDispatcher
-from ..pipeline_latency import LatencyTraceContext, log_assemblyai_partial_stable
 from ..modules.transcription.transcription_pipeline_service import (
     TranscriptionPipelineService,
 )
-from ..modules.transcription.transcription_service import TranscriptionService
 from ..services.audio_service import AudioService
 from ..utils.proto_utils import (
     generate_proto_code_batch,
     validate_proto_file_list,
 )
+from ..modules.infra import MeetingStateStore, try_create_redis
 from ..ws_gateway import DesktopWsGateway, DesktopWsAuthenticator, FeedbackHub
 
 logger = logging.getLogger(__name__)
@@ -64,16 +44,12 @@ class _ServerRuntime:
         text_analysis_service: TextAnalysisService,
         publish_dispatcher: PublishDispatcher,
         backend_feedback_client: BackendFeedbackClient,
-        transcription_service: Optional[TranscriptionService] = None,
-        streaming_stt_provider: Optional[AssemblyAiStreamingProvider] = None,
         desktop_ws_gateway: Optional[DesktopWsGateway] = None,
         live_manager: Optional[GeminiLiveManager] = None,
     ) -> None:
         self.text_analysis_service = text_analysis_service
         self.publish_dispatcher = publish_dispatcher
         self.backend_feedback_client = backend_feedback_client
-        self.transcription_service = transcription_service
-        self.streaming_stt_provider = streaming_stt_provider
         self.desktop_ws_gateway = desktop_ws_gateway
         self.live_manager = live_manager
         self._closed = False
@@ -110,18 +86,6 @@ class _ServerRuntime:
         except Exception:
             logger.exception('Failed to close backend feedback client')
 
-        try:
-            if self.streaming_stt_provider is not None:
-                self.streaming_stt_provider.close_all()
-        except Exception:
-            logger.exception('Failed to close streaming STT provider')
-
-        try:
-            if self.transcription_service is not None:
-                self.transcription_service.shutdown()
-        except Exception:
-            logger.exception('Failed to shutdown transcription service')
-
 
 def validate_proto_code(proto_dir: Optional[str] = None) -> bool:
     """
@@ -137,9 +101,8 @@ def validate_proto_code(proto_dir: Optional[str] = None) -> bool:
         proto_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'proto')
 
     proto_dir = os.path.abspath(proto_dir)
-    required_proto_files = ['audio_pipeline.proto', 'feedback_ingestion.proto']
+    required_proto_files = ['feedback_ingestion.proto']
     required_generated_files = [
-        ('audio_pipeline_pb2.py', 'audio_pipeline_pb2_grpc.py'),
         ('feedback_ingestion_pb2.py', 'feedback_ingestion_pb2_grpc.py'),
     ]
 
@@ -168,31 +131,6 @@ def validate_proto_code(proto_dir: Optional[str] = None) -> bool:
             return False
 
     return True
-
-
-def _warmup_ml_models(
-    transcription_service: TranscriptionService,
-    text_analysis_service: TextAnalysisService,
-) -> None:
-    """Load Whisper before the first audio window (avoids cold-start lag)."""
-    t0 = time.perf_counter()
-    try:
-        transcription_service.preload_model()
-    except Exception:
-        logger.exception('Whisper preload failed — first stream may be slow')
-    t1 = time.perf_counter()
-    try:
-        # Preloading is not required for Gemini Analyzer API context
-        pass
-    except Exception:
-        logger.exception('LLM loading failed — first analysis may be slow')
-    t2 = time.perf_counter()
-    logger.info(
-        'ML preload complete | whisper_s=%.2f | sbert_s=%.2f | total_s=%.2f',
-        t1 - t0,
-        t2 - t1,
-        t2 - t0,
-    )
 
 
 def create_server(config: Settings) -> grpc.Server:
@@ -260,7 +198,9 @@ def create_server(config: Settings) -> grpc.Server:
             else config.audio_buffer_window_seconds,
         ),
     )
-    text_analysis_service = TextAnalysisService()
+    redis_bus = try_create_redis(config.redis_url)
+    meeting_state = MeetingStateStore(redis_bus)
+    text_analysis_service = TextAnalysisService(meeting_state=meeting_state)
     service_jwt_provider: ServiceJwtProvider | None = None
     if config.grpc_feedback_enabled and config.grpc_feedback_wants_auto_jwt():
         assert config.backend_http_base_url
@@ -294,6 +234,7 @@ def create_server(config: Settings) -> grpc.Server:
             backend_http_base_url=config.backend_http_base_url,
             bootstrap_key=config.service_bootstrap_key or '',
             service_jwt_provider=service_jwt_provider,
+            redis_client=redis_bus,
         )
 
     feedback_hub: FeedbackHub | None = None
@@ -301,6 +242,7 @@ def create_server(config: Settings) -> grpc.Server:
         feedback_hub = FeedbackHub(
             catalog_cache=playbook_catalog,
             playbook_url_allowlist=config.playbook_url_allowlist,
+            redis_bus=redis_bus,
         )
 
     publish_dispatcher = PublishDispatcher(
@@ -313,25 +255,10 @@ def create_server(config: Settings) -> grpc.Server:
         local_broadcast_fn=feedback_hub.broadcast if feedback_hub else None,
     )
 
-    # Inject publish_dispatcher into TextAnalysisService for deferred rate-limit dispatch
-    if get_settings().llm_provider != 'ollama':
-        text_analysis_service._publish_dispatcher = publish_dispatcher
-
-    transcription_service: TranscriptionService | None = None
-    if not multimodal_audio and config.stt_provider == 'local':
-        transcription_service = TranscriptionService(
-            model_size=config.transcription_model_size,
-            device=config.transcription_device,
-            compute_type=config.transcription_compute_type,
-            vad_filter=config.whisper_vad_filter,
-            empty_diagnostic_no_vad=config.whisper_empty_diagnostic_no_vad,
-            low_energy_dbfs_threshold=config.whisper_low_energy_dbfs,
-            default_language=config.whisper_default_language,
-            process_workers=config.stt_process_workers,
-        )
+    text_analysis_service._publish_dispatcher = publish_dispatcher
 
     transcription_pipeline_service = TranscriptionPipelineService(
-        transcription_service=transcription_service,
+        transcription_service=None,
         text_analysis_service=text_analysis_service,
         publish_dispatcher=publish_dispatcher,
         default_language=config.whisper_default_language,
@@ -342,144 +269,21 @@ def create_server(config: Settings) -> grpc.Server:
         multimodal_audio_enabled=multimodal_audio,
         live_host_context_fn=None,
     )
-    partial_coordinator: PartialTurnCoordinator | None = None
-    if (
-        not multimodal_audio
-        and config.stt_provider == 'assemblyai'
-        and config.partial_analysis_enabled
-    ):
-
-        def _on_partial_ready(
-            stream_key: str,
-            chunk: object,
-            extra: dict[str, object],
-        ) -> None:
-            from ..modules.text_analysis.types import TranscriptionChunk
-
-            assert isinstance(chunk, TranscriptionChunk)
-            trace_ctx = LatencyTraceContext(
-                trace_id=make_feedback_trace_id(
-                    chunk.meeting_id,
-                    chunk.participant_id,
-                    chunk.window_end_ms,
-                ),
-                meeting_id=chunk.meeting_id,
-                participant_id=chunk.participant_id,
-                window_end_ms=chunk.window_end_ms,
-            )
-            turn_open_ms = extra.get('turnOpenMs')
-            log_assemblyai_partial_stable(
-                logger,
-                trace_ctx,
-                stream_key=stream_key,
-                transcript_chars=len(chunk.text),
-                completeness_reason=str(extra.get('completenessReason') or ''),
-                turn_open_ms=turn_open_ms if isinstance(turn_open_ms, int) else None,
-            )
-            transcription_pipeline_service.process_transcript(
-                stream_key,
-                chunk,
-                transcript_source='partial',
-                extra_meta=extra,
-            )
-
-        partial_coordinator = PartialTurnCoordinator(
-            PartialTurnConfig(
-                enabled=True,
-                stable_ms=config.partial_stable_ms,
-                word_stable_ms=config.partial_word_stable_ms,
-                growth_window_ms=config.partial_growth_window_ms,
-                min_words=config.partial_min_words,
-                cooldown_ms=config.partial_cooldown_ms,
-            ),
-            _on_partial_ready,
-        )
-        transcription_pipeline_service._partial_coordinator = partial_coordinator
-
-    streaming_stt_provider: AssemblyAiStreamingProvider | None = None
-    if not multimodal_audio and config.stt_provider == 'assemblyai':
-        assert config.assemblyai_api_key
-
-        def _on_assemblyai_final(
-            stream_key: str,
-            chunk: object,
-            extra_stats: dict[str, object],
-        ) -> None:
-            from ..modules.text_analysis.types import TranscriptionChunk
-
-            assert isinstance(chunk, TranscriptionChunk)
-            audio_stats = {
-                k: v
-                for k, v in extra_stats.items()
-                if k
-                not in {
-                    'acoustic_class',
-                    'matched_seller_id',
-                    'correlation_confidence',
-                    'seller_room_id',
-                }
-            }
-            extra_meta = {
-                k: extra_stats[k]
-                for k in (
-                    'acoustic_class',
-                    'matched_seller_id',
-                    'correlation_confidence',
-                    'seller_room_id',
-                )
-                if k in extra_stats
-            }
-            transcription_pipeline_service.process_transcript(
-                stream_key,
-                chunk,
-                audio_stats,
-                transcript_source='final',
-                extra_meta=extra_meta or None,
-            )
-
-        streaming_stt_provider = AssemblyAiStreamingProvider(
-            AssemblyAiStreamConfig(
-                api_key=config.assemblyai_api_key,
-                api_host=config.assemblyai_api_host,
-                speech_model=config.assemblyai_speech_model,
-                sample_rate=config.assemblyai_sample_rate,
-                format_turns=config.assemblyai_format_turns,
-                continuous_partials=config.assemblyai_continuous_partials,
-                stream_idle_timeout_ms=config.assemblyai_stream_idle_timeout_ms,
-                reconnect_limit=config.assemblyai_reconnect_limit,
-                connect_timeout_seconds=config.assemblyai_connect_timeout_seconds,
-                termination_timeout_seconds=config.assemblyai_termination_timeout_seconds,
-                end_of_turn_confidence_threshold=(
-                    config.assemblyai_end_of_turn_confidence_threshold
-                ),
-                min_turn_silence_ms=config.assemblyai_min_turn_silence_ms,
-                max_turn_silence_ms=config.assemblyai_max_turn_silence_ms,
-                vad_threshold=config.assemblyai_vad_threshold,
-                keyterms_prompt=config.assemblyai_keyterms_prompt,
-                tab_audio_vad_threshold=config.assemblyai_tab_audio_vad_threshold,
-                tab_audio_max_turn_silence_ms=(
-                    config.assemblyai_tab_audio_max_turn_silence_ms
-                ),
-            ),
-            _on_assemblyai_final,
-            partial_coordinator=partial_coordinator,
-        )
-    else:
-        ready_window_dispatcher = ReadyWindowDispatcher(
-            transcription_pipeline_service.process_window,
-            max_queue_size=config.window_queue_max_size,
-            worker_threads=config.window_worker_threads,
-            max_age_ms=config.window_max_age_ms,
-            low_priority_speech_ratio_below=config.window_low_priority_speech_ratio_below,
-        )
-        audio_buffer_service.register_window_callback(
-            lambda sk, pcm, meta: ready_window_dispatcher.enqueue(sk, pcm, meta),
-        )
+    ready_window_dispatcher = ReadyWindowDispatcher(
+        transcription_pipeline_service.process_window,
+        max_queue_size=config.window_queue_max_size,
+        worker_threads=config.window_worker_threads,
+        max_age_ms=config.window_max_age_ms,
+        low_priority_speech_ratio_below=config.window_low_priority_speech_ratio_below,
+    )
+    audio_buffer_service.register_window_callback(
+        lambda sk, pcm, meta: ready_window_dispatcher.enqueue(sk, pcm, meta),
+    )
 
     audio_service = AudioService(
         audio_buffer_service=audio_buffer_service,
-        streaming_stt_provider=streaming_stt_provider,
     )
+
 
     live_manager: GeminiLiveManager | None = None
     if live_audio:
@@ -492,8 +296,16 @@ def create_server(config: Settings) -> grpc.Server:
             secondary_cooldown_ms=config.live_specialist_cooldown_ms,
             secondary_max_age_ms=config.live_specialist_max_age_ms,
             secondary_types=config.live_secondary_feedback_types,
+            meeting_state=meeting_state,
         )
         turn_graphs = LiveTurnGraphs() if config.live_langgraph_enabled else None
+        specialist_catalog = SpecialistCatalog(
+            backend_http_base_url=config.backend_http_base_url or '',
+            bootstrap_key=config.service_bootstrap_key or '',
+            service_jwt_provider=service_jwt_provider,
+            redis_client=redis_bus,
+        )
+        specialist_catalog.register_builtins_with_backend()
         live_manager = GeminiLiveManager(
             api_key=live_key,
             model_name=config.live_model,
@@ -507,20 +319,18 @@ def create_server(config: Settings) -> grpc.Server:
             session_rotation_minutes=config.live_session_rotation_minutes,
             catalog_cache=playbook_catalog,
             turn_graphs=turn_graphs,
+            live_provider=config.live_provider,
+            key_pool=text_analysis_service._gemini_pool,
+            meeting_state=meeting_state,
         )
         if config.live_specialist_enabled:
-            specialist_analyzer = GeminiSpecialistAnalyzer(
+            specialist_fanout = SpecialistFanout(
+                specialist_catalog,
                 api_key=live_key,
-                model_name=config.live_specialist_model,
+                on_result=live_manager.handle_specialist_outputs,
+                enabled=True,
             )
-            specialist_runner = LiveSpecialistRunner(
-                specialist_analyzer.analyze,
-                live_manager.handle_specialist_result,
-                max_queue_size=config.live_specialist_queue_max_size,
-                timeout_ms=config.live_specialist_timeout_ms,
-                max_age_ms=config.live_specialist_max_age_ms,
-            )
-            live_manager.set_specialist_runner(specialist_runner)
+            live_manager.set_specialist_fanout(specialist_fanout)
         live_manager.start()
         audio_service.live_manager = live_manager
         transcription_pipeline_service._live_host_context_fn = (
@@ -545,6 +355,9 @@ def create_server(config: Settings) -> grpc.Server:
             feedback_hub=feedback_hub,
             audio_service=audio_service,
             coalesce_ms=config.desktop_ws_coalesce_ms,
+            live_manager=live_manager,
+            catalog_cache=playbook_catalog,
+            lifecycle_reporter=backend_feedback_client.report_session_lifecycle,
         )
         desktop_ws_gateway.start()
     else:
@@ -553,15 +366,7 @@ def create_server(config: Settings) -> grpc.Server:
 
         start_health_http('0.0.0.0', config.port)
 
-    servicer = AudioPipelineServicer(audio_service)
-
-    # Register servicer
-    audio_pipeline_pb2_grpc.add_AudioPipelineServiceServicer_to_server(
-        servicer,
-        server
-    )
-
-    logger.info(f"Servidor gRPC criado com {config.grpc_workers} workers")
+    logger.info(f"Servidor gRPC (feedback client only) workers={config.grpc_workers}")
     if live_audio:
         logger.info(
             'Audio analysis | mode=live | live_model=%s | silence_ms=%s | '
@@ -582,42 +387,6 @@ def create_server(config: Settings) -> grpc.Server:
             config.audio_analysis_client_interval_ms,
             config.audio_analysis_host_interval_ms,
             config.audio_analysis_overlap_ms,
-        )
-    elif config.stt_provider == 'assemblyai':
-        logger.info(
-            'STT config | provider=assemblyai | model=%s | api_host=%s | '
-            'sample_rate=%s | format_turns=%s | continuous_partials=%s | '
-            'idle_timeout_ms=%s | min_turn_silence_ms=%s | max_turn_silence_ms=%s | '
-            'vad_threshold=%s | tab_audio_vad_threshold=%s | '
-            'tab_audio_max_turn_silence_ms=%s | partial_analysis=%s | '
-            'partial_stable_ms=%s | partial_min_confidence=%s | '
-            'feedback_allow_host_publish=%s',
-            config.assemblyai_speech_model,
-            config.assemblyai_api_host,
-            config.assemblyai_sample_rate,
-            config.assemblyai_format_turns,
-            config.assemblyai_continuous_partials,
-            config.assemblyai_stream_idle_timeout_ms,
-            config.assemblyai_min_turn_silence_ms,
-            config.assemblyai_max_turn_silence_ms,
-            config.assemblyai_vad_threshold,
-            config.assemblyai_tab_audio_vad_threshold,
-            config.assemblyai_tab_audio_max_turn_silence_ms,
-            config.partial_analysis_enabled,
-            config.partial_stable_ms,
-            config.partial_min_confidence,
-            config.feedback_allow_host_publish,
-        )
-    else:
-        logger.info(
-            'STT config | provider=local | STT_PROCESS_WORKERS=%s | '
-            'WHISPER_VAD_FILTER=%s | WHISPER_EMPTY_DIAGNOSTIC_NO_VAD=%s | '
-            'WHISPER_LOW_ENERGY_DBFS=%s | WHISPER_DEFAULT_LANGUAGE=%s',
-            config.stt_process_workers,
-            config.whisper_vad_filter,
-            config.whisper_empty_diagnostic_no_vad,
-            config.whisper_low_energy_dbfs,
-            config.whisper_default_language,
         )
     logger.info('Gemini LLM Analyzer enabled')
     logger.info(
@@ -656,17 +425,10 @@ def create_server(config: Settings) -> grpc.Server:
         ) or 'none',
     )
 
-    if config.preload_ml_models and transcription_service is not None:
-        logger.info('PRELOAD_ML_MODELS=true — loading Whisper + embedding model...')
-        _warmup_ml_models(transcription_service, text_analysis_service)
-    elif live_audio:
-        logger.info('AUDIO_ANALYSIS_MODE=live — skipping all STT model preload')
-    elif multimodal_audio:
-        logger.info('AUDIO_ANALYSIS_MODE=multimodal — skipping all STT model preload')
-    elif config.stt_provider == 'assemblyai':
-        logger.info('STT_PROVIDER=assemblyai — skipping local Whisper preload')
-    else:
-        logger.info('PRELOAD_ML_MODELS=false — models load on first use')
+    logger.info(
+        'AUDIO_ANALYSIS_MODE=%s — Live + multimodal host observe (no STT preload)',
+        config.audio_analysis_mode,
+    )
 
     # Attach runtime resources required for graceful shutdown.
     setattr(
@@ -676,8 +438,6 @@ def create_server(config: Settings) -> grpc.Server:
             text_analysis_service=text_analysis_service,
             publish_dispatcher=publish_dispatcher,
             backend_feedback_client=backend_feedback_client,
-            transcription_service=transcription_service,
-            streaming_stt_provider=streaming_stt_provider,
             desktop_ws_gateway=desktop_ws_gateway,
             live_manager=live_manager,
         ),
@@ -715,7 +475,6 @@ def start_server(server: grpc.Server, config: Settings) -> None:
     server.start()
 
     logger.info(f"🚀 Servidor gRPC iniciado em {listen_addr}")
-    logger.info(f"📡 Aguardando streams de áudio...")
 
     try:
         server.wait_for_termination()

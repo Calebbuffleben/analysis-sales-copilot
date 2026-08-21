@@ -230,3 +230,57 @@ class BackendFeedbackClient:
         """Close the gRPC channel when the process is shutting down."""
         if self._channel is not None:
             self._channel.close()
+
+    def report_session_lifecycle(
+        self,
+        *,
+        event: str,
+        tenant_id: str,
+        meeting_id: str,
+        user_id: str = '',
+        participant_id: str = '',
+        participant_role: str = '',
+        track: str = '',
+        sample_rate: int = 16000,
+        channels: int = 1,
+        duration_ms: int = 0,
+        chunks_received: int = 0,
+        **_ignored: Any,
+    ) -> None:
+        if self._enabled and self._stub is None:
+            self._initialize_stub()
+        if not self._enabled or self._stub is None:
+            return
+        request_cls = getattr(
+            self._feedback_ingestion_pb2,
+            'SessionLifecycleRequest',
+            None,
+        )
+        if request_cls is None:
+            logger.warning('SessionLifecycleRequest missing from proto — skip lifecycle')
+            return
+        request = request_cls(
+            tenant_id=tenant_id,
+            meeting_id=meeting_id,
+            user_id=user_id or '',
+            participant_id=participant_id or '',
+            participant_role=participant_role or '',
+            track=track or '',
+            sample_rate=int(sample_rate or 16000),
+            channels=int(channels or 1),
+            event=event,
+            duration_ms=int(duration_ms or 0),
+            chunks_received=int(chunks_received or 0),
+        )
+        try:
+            self._stub.ReportSessionLifecycle(
+                request,
+                timeout=self._timeout_seconds,
+                metadata=self._build_call_metadata(tenant_id),
+            )
+        except Exception:
+            logger.exception(
+                'session lifecycle rpc failed | event=%s | meeting=%s',
+                event,
+                meeting_id,
+            )

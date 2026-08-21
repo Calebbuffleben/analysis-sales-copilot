@@ -149,6 +149,9 @@ class GeminiKeyPool:
     def resolve_slot(self, tenant_id: str | None) -> GeminiKeySlot:
         return self.resolve_slots_ordered(tenant_id)[0]
 
+    def resolve_api_key(self, tenant_id: str | None) -> str:
+        return str(getattr(self.resolve_slot(tenant_id).analyzer, '_api_key', '') or '')
+
     def resolve_slots_ordered(self, tenant_id: str | None) -> tuple[GeminiKeySlot, ...]:
         """Sticky primary slot, then remaining keys for auth failover."""
         routing_key = (tenant_id or 'default').strip() or 'default'

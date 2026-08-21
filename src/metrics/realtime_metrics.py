@@ -512,6 +512,14 @@ LIVE_VAD_END_TO_TOOL_CALL_MS = _metric_or_noop(
     buckets=(50, 100, 200, 400, 600, 850, 1000, 1500, 3000, 5000),
 )
 
+LIVE_STAGE_MS = _metric_or_noop(
+    Histogram,
+    'live_stage_ms',
+    'Per-stage Live turn latency in milliseconds.',
+    ('stage',),
+    buckets=(5, 10, 20, 40, 80, 150, 300, 600, 1000, 2000, 4000),
+)
+
 LIVE_SPEECH_END_TO_WS_MS = _metric_or_noop(
     Histogram,
     'live_speech_end_to_ws_ms',
@@ -541,6 +549,13 @@ LIVE_FALLBACK_TOTAL = _metric_or_noop(
     Counter,
     'live_fallback_total',
     'Total times Live path fell back to generateContent multimodal.',
+)
+
+LIVE_ADMISSION_REJECTED_TOTAL = _metric_or_noop(
+    Counter,
+    'live_admission_rejected_total',
+    'Live sessions rejected by admission control.',
+    ['reason'],
 )
 
 LANGGRAPH_NODE_MS = _metric_or_noop(

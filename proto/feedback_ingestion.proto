@@ -4,6 +4,7 @@ package feedback_ingestion;
 
 service FeedbackIngestionService {
   rpc PublishFeedback(PublishFeedbackRequest) returns (PublishFeedbackResponse);
+  rpc ReportSessionLifecycle(SessionLifecycleRequest) returns (SessionLifecycleResponse);
 }
 
 message AnalysisPayload {
@@ -39,4 +40,22 @@ message PublishFeedbackResponse {
   bool accepted = 1;
   string feedback_id = 2;
   string message = 3;
+}
+
+message SessionLifecycleRequest {
+  string tenant_id = 1;
+  string meeting_id = 2;
+  string user_id = 3;
+  string participant_id = 4;
+  string participant_role = 5;
+  string track = 6;
+  int32 sample_rate = 7;
+  int32 channels = 8;
+  string event = 9;
+  int64 duration_ms = 10;
+  int32 chunks_received = 11;
+}
+
+message SessionLifecycleResponse {
+  bool accepted = 1;
 }

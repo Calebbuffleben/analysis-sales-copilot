@@ -3,13 +3,10 @@
 import logging
 from typing import TYPE_CHECKING, Optional
 
-from ..modules.audio_buffer.service import AudioBufferService
-from ..modules.transcription.assemblyai_streaming_provider import (
-    AssemblyAiStreamingProvider,
-)
 from .stream_service import StreamService, StreamStats
 
 if TYPE_CHECKING:
+    from ..modules.audio_buffer.service import AudioBufferService
     from ..modules.text_analysis.gemini_live_session import GeminiLiveManager
 
 logger = logging.getLogger(__name__)
@@ -21,8 +18,7 @@ class AudioService:
     def __init__(
         self,
         stream_service: Optional[StreamService] = None,
-        audio_buffer_service: Optional[AudioBufferService] = None,
-        streaming_stt_provider: Optional[AssemblyAiStreamingProvider] = None,
+        audio_buffer_service: Optional['AudioBufferService'] = None,
         live_manager: Optional['GeminiLiveManager'] = None,
     ):
         """
@@ -33,7 +29,6 @@ class AudioService:
         """
         self.stream_service = stream_service or StreamService()
         self.audio_buffer_service = audio_buffer_service
-        self.streaming_stt_provider = streaming_stt_provider
         self.live_manager = live_manager
 
     def start_stream(
@@ -137,34 +132,7 @@ class AudioService:
                 matched_seller_id=matched_seller_id,
                 correlation_confidence=correlation_confidence,
             )
-        if self.streaming_stt_provider and stats:
-            try:
-                self.streaming_stt_provider.send_audio(
-                    stats.key,
-                    wav_data,
-                    {
-                        'stream_key': stats.key,
-                        'meeting_id': meeting_id,
-                        'participant_id': participant_id,
-                        'track': track,
-                        'sample_rate': stats.sample_rate,
-                        'channels': stats.channels,
-                        'timestamp_ms': timestamp_ms,
-                        'sequence': sequence,
-                        'tenant_id': tenant_id,
-                        'participant_role': participant_role,
-                        'acoustic_class': acoustic_class,
-                        'seller_room_id': seller_room_id,
-                        'matched_seller_id': matched_seller_id,
-                        'correlation_confidence': correlation_confidence,
-                    },
-                )
-            except Exception as exc:
-                logger.exception(
-                    'AssemblyAI streaming send failed | stream_key=%s | error=%s',
-                    stats.key,
-                    exc,
-                )
+        # Host/fallback windows continue through AudioBufferService.
 
     def end_stream(
         self,
@@ -184,8 +152,6 @@ class AudioService:
             Final StreamStats if stream existed, None otherwise
         """
         stream_key = f"{meeting_id}:{participant_id}:{track}"
-        if self.streaming_stt_provider:
-            self.streaming_stt_provider.end_stream(stream_key)
         if self.audio_buffer_service:
             self.audio_buffer_service.end_stream(stream_key)
         if self.live_manager and track != 'microphone':

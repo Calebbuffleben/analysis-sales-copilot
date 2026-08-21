@@ -37,12 +37,16 @@ class FeedbackHub:
         *,
         catalog_cache: Optional[PlaybookCatalogCache] = None,
         playbook_url_allowlist: str = '',
+        redis_bus: Any = None,
     ) -> None:
         self._lock = threading.Lock()
         self._rooms: dict[RoomKey, set[Any]] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._catalog_cache = catalog_cache
         self._url_allowlist = parse_playbook_url_allowlist_env(playbook_url_allowlist)
+        self._redis = redis_bus
+        if self._redis is not None:
+            self._redis.subscribe('feedback:broadcast', self._on_redis_message)
 
     def attach_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
@@ -89,8 +93,6 @@ class FeedbackHub:
         key = (event.tenant_id, event.meeting_id)
         with self._lock:
             connections = list(self._rooms.get(key) or ())
-        if not connections:
-            return False
 
         started = time.perf_counter()
         payload = self._build_payload(event, direct_feedback)
@@ -98,6 +100,42 @@ class FeedbackHub:
             text = json.dumps(payload, ensure_ascii=False)
         except (TypeError, ValueError):
             logger.exception('ws feedback payload serialization failed')
+            return False
+
+        if self._redis is not None:
+            try:
+                self._redis.publish(
+                    'feedback:broadcast',
+                    {
+                        'tenantId': event.tenant_id,
+                        'meetingId': event.meeting_id,
+                        'text': text,
+                    },
+                )
+            except Exception:
+                logger.exception('redis feedback publish failed')
+                if not connections:
+                    return False
+            else:
+                speech_end = event.speech_end_ms or event.window_end_ms
+                speech_to_ws = max(0, int(time.time() * 1000) - int(speech_end or 0))
+                logger.info(
+                    '⚡ ws feedback broadcast | tenantId=%s | meetingId=%s | subscribers=%s | '
+                    'feedbackType=%s | turnId=%s | speechEndToWsMs=%s | broadcastSchedMs=%.1f | '
+                    'traceId=%s | hasPlaybook=%s | redis=1',
+                    event.tenant_id,
+                    event.meeting_id,
+                    len(connections),
+                    event.analysis.feedback_type,
+                    event.turn_id or '',
+                    speech_to_ws,
+                    (time.perf_counter() - started) * 1000.0,
+                    event.feedback_trace_id or '',
+                    bool(payload.get('payload', {}).get('metadata', {}).get('playbook')),
+                )
+                return True
+
+        if not connections:
             return False
 
         for connection in connections:
@@ -123,6 +161,24 @@ class FeedbackHub:
             bool(payload.get('payload', {}).get('metadata', {}).get('playbook')),
         )
         return True
+
+    def _on_redis_message(self, raw: str) -> None:
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return
+        tenant_id = str(data.get('tenantId') or '')
+        meeting_id = str(data.get('meetingId') or '')
+        text = str(data.get('text') or '')
+        if not tenant_id or not meeting_id or not text:
+            return
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        with self._lock:
+            connections = list(self._rooms.get((tenant_id, meeting_id)) or ())
+        for connection in connections:
+            asyncio.run_coroutine_threadsafe(self._safe_send(connection, text), loop)
 
     @staticmethod
     async def _safe_send(connection: Any, text: str) -> None:

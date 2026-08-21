@@ -16,7 +16,6 @@ from .gemini_analyzer import (
     QuotaExhaustedError,
 )
 from .gemini_key_pool import GeminiKeyPool, GeminiKeySlot
-from .ollama_analyzer import OllamaAnalyzer
 from .llm_state_validator import ConversationState, validate_conversation_state, build_playbook_hint_json
 from .llm_cache import SimpleTextCache
 from .llm_logger import log_llm_interaction, log_llm_state_change
@@ -151,36 +150,24 @@ class TextAnalysisService:
     def __init__(
         self,
         gemini_analyzer: Optional[GeminiAnalyzer] = None,
-        ollama_analyzer: Optional[OllamaAnalyzer] = None,
         publish_dispatcher: Optional['PublishDispatcher'] = None,
+        meeting_state: Optional[Any] = None,
     ):
         settings = get_settings()
 
-        # Initialize LLM provider based on configuration
-        self.llm_provider = settings.llm_provider
-
-        if self.llm_provider == 'ollama':
-            self.active_analyzer = ollama_analyzer or OllamaAnalyzer(
-                base_url=settings.ollama_base_url,
-                model=settings.ollama_model,
-                timeout=settings.ollama_timeout,
+        self.llm_provider = 'gemini'
+        self._gemini_pool = (
+            GeminiKeyPool.from_analyzer(
+                gemini_analyzer,
+                rpm_limit=settings.gemini_rpm_limit,
+                rpm_window_sec=settings.gemini_rpm_window_sec,
             )
-            self._gemini_pool: Optional[GeminiKeyPool] = None
-            logger.info("Using Ollama LLM provider (model: %s)", settings.ollama_model)
-            self._rate_limiter_enabled = False
-        else:  # gemini
-            self._gemini_pool = (
-                GeminiKeyPool.from_analyzer(
-                    gemini_analyzer,
-                    rpm_limit=settings.gemini_rpm_limit,
-                    rpm_window_sec=settings.gemini_rpm_window_sec,
-                )
-                if gemini_analyzer is not None
-                else GeminiKeyPool.from_settings(settings)
-            )
-            self.active_analyzer = self._gemini_pool.slots[0].analyzer
-            logger.info("Using Gemini LLM provider (model: %s)", settings.gemini_model)
-            self._rate_limiter_enabled = True
+            if gemini_analyzer is not None
+            else GeminiKeyPool.from_settings(settings)
+        )
+        self.active_analyzer = self._gemini_pool.slots[0].analyzer
+        logger.info("Using Gemini LLM provider (model: %s)", settings.gemini_model)
+        self._rate_limiter_enabled = True
 
         # --- RPM rate limiter (Gemini only) ---
         # Queue of deferred analyses waiting for an RPM slot.
@@ -194,6 +181,7 @@ class TextAnalysisService:
 
         # Publish dispatcher reference for deferred analysis dispatch
         self._publish_dispatcher = publish_dispatcher
+        self._meeting_state = meeting_state
 
         # Thread-safe state storage with metadata
         self._lock = threading.RLock()
@@ -386,6 +374,14 @@ class TextAnalysisService:
 
     def _get_current_state(self, context_key: str) -> Dict[str, Any]:
         """Initialize and return a snapshot of the cached conversation state."""
+        if self._meeting_state is not None and ':' in context_key:
+            tenant_id, meeting_id = context_key.split(':', 1)
+            remote = self._meeting_state.get_conversation(tenant_id, meeting_id)
+            if remote:
+                with self._lock:
+                    self._state[context_key] = dict(remote)
+                    self._touch_state(context_key)
+                return dict(remote)
         with self._lock:
             if context_key not in self._state:
                 self._state[context_key] = ConversationState.default_state().to_dict()
@@ -393,6 +389,13 @@ class TextAnalysisService:
             current_state = dict(self._state[context_key])
             self._touch_state(context_key)
         return current_state
+
+    def _persist_state(self, context_key: str, state: Dict[str, Any]) -> None:
+        with self._lock:
+            self._state[context_key] = dict(state)
+        if self._meeting_state is not None and ':' in context_key:
+            tenant_id, meeting_id = context_key.split(':', 1)
+            self._meeting_state.set_conversation(tenant_id, meeting_id, state)
 
     def _cleanup_expired_states(self) -> int:
         """Remove expired states based on TTL."""
@@ -571,7 +574,7 @@ class TextAnalysisService:
         with self._lock:
             latest_state = dict(self._state.get(context_key, current_state))
             new_state = _merge_conversation_state(latest_state, raw_next)
-            self._state[context_key] = new_state.to_dict()
+        self._persist_state(context_key, new_state.to_dict())
 
         playbook_hint_json = _playbook_hint_for_result_dict(analysis_result)
 
@@ -698,7 +701,7 @@ class TextAnalysisService:
                 raw_next if isinstance(raw_next, dict) else {},
             )
             state_dict = new_state.to_dict()
-            self._state[context_key] = state_dict
+        self._persist_state(context_key, state_dict)
 
         return (
             TextAnalysisResult(
@@ -755,7 +758,7 @@ class TextAnalysisService:
             latest_state = dict(self._state.get(context_key, current_state))
             new_state = _merge_conversation_state(latest_state, raw_next)
             state_dict = new_state.to_dict()
-            self._state[context_key] = state_dict
+        self._persist_state(context_key, state_dict)
 
         logger.info(
             "python.host_context_observed | meeting=%s | tenant=%s | "
