@@ -14,3 +14,5 @@ pytest>=7.0
 requests>=2.31
 python-dotenv>=1.0.0
 langgraph==1.2.10
+redis>=5.0
+uvloop>=0.21; sys_platform != "win32"

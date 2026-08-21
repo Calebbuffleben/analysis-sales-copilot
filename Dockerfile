@@ -17,15 +17,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY proto/ ./proto/
 COPY src/ ./src/
-COPY test_gemini_verify.py .
-COPY test_gemini_live_spike.py .
 
 RUN python -m grpc_tools.protoc \
-    --proto_path=./proto \
-    --python_out=./proto \
-    --grpc_python_out=./proto \
-    ./proto/audio_pipeline.proto \
-    && python -m grpc_tools.protoc \
     --proto_path=./proto \
     --python_out=./proto \
     --grpc_python_out=./proto \
@@ -38,7 +31,7 @@ ENV DESKTOP_WS_ENABLED=true
 
 # Cloud Run ingress (WSS + /health)
 EXPOSE 8080
-# Internal gRPC audio (fallback / phase 2)
+# Internal gRPC leftover port (no inbound StreamAudio)
 EXPOSE 50051
 # Prometheus metrics (internal)
 EXPOSE 9100

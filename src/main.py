@@ -32,6 +32,12 @@ logger = logging.getLogger(
 def main():
     """Main entry point for the application."""
     try:
+        try:
+            import uvloop
+
+            uvloop.install()
+        except ImportError:
+            pass
         # Load configuration
         config = get_settings()
 

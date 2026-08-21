@@ -356,6 +356,13 @@ def test_receive_loop_restarts_after_turn_complete() -> None:
 
             return _gen()
 
+        @staticmethod
+        def parse_tool_calls(response):
+            return []
+
+        async def ack_tools(self, function_calls):
+            return None
+
     async def _run() -> int:
         manager = GeminiLiveManager(
             api_key='AIzaSyTest',
@@ -374,7 +381,7 @@ def test_receive_loop_restarts_after_turn_complete() -> None:
         )
         live = _FakeLive()
         task = asyncio.create_task(
-            manager._receive_loop(session, live, types=MagicMock()),
+            manager._receive_loop(session, live),
         )
         await asyncio.sleep(0.05)
         assert live.calls >= 2
@@ -422,11 +429,7 @@ def test_tool_response_releases_awaiting_tool() -> None:
             pending_turn=None,
             tenant_id='t1',
         )
-        live = MagicMock()
-        live.send_tool_response = AsyncMock()
-        types = MagicMock()
-        types.FunctionResponse = MagicMock(side_effect=lambda **kw: SimpleNamespace(**kw))
-        fc = SimpleNamespace(id='1', name='emit_feedback', args={'turnId': 't1', 'feedback': ''})
+        fc = SimpleNamespace(id='1', name='emit_feedback')
         response = SimpleNamespace(
             usage_metadata=None,
             session_resumption_update=None,
@@ -434,11 +437,16 @@ def test_tool_response_releases_awaiting_tool() -> None:
             tool_call=SimpleNamespace(function_calls=[fc]),
             server_content=None,
         )
+        coach = MagicMock()
+        coach.parse_tool_calls = MagicMock(
+            return_value=[('emit_feedback', {'turnId': 't1', 'feedback': ''}, fc)],
+        )
+        coach.ack_tools = AsyncMock()
         manager._on_emit_feedback = AsyncMock()  # type: ignore[method-assign]
-        await manager._handle_server_message(session, live, types, response)
+        await manager._handle_server_message(session, coach, response)
         assert session.awaiting_tool is False
         assert session.model_turn_done.is_set()
-        live.send_tool_response.assert_awaited_once()
+        coach.ack_tools.assert_awaited_once()
 
     asyncio.run(_run())
 

@@ -11,15 +11,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
+import os
 import threading
 import time
-import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from ...metrics.realtime_metrics import (
+    LIVE_ADMISSION_REJECTED_TOTAL,
     LIVE_AUDIO_BYTES_SENT_TOTAL,
     LIVE_COST_LIMIT_TRIPS_TOTAL,
     LIVE_COST_USD_PER_MEETING,
@@ -29,6 +29,7 @@ from ...metrics.realtime_metrics import (
     LIVE_SESSIONS_OPEN,
     LIVE_SESSIONS_RESUMED_TOTAL,
     LIVE_SESSIONS_STARTED_TOTAL,
+    LIVE_STAGE_MS,
     LIVE_UNEXPECTED_AUDIO_BYTES_TOTAL,
     LIVE_VAD_END_TO_TOOL_CALL_MS,
 )
@@ -39,13 +40,22 @@ from ..audio_buffer.prosody_analyzer import (
     analyze_turn_prosody,
 )
 from ..audio_buffer.service import WAV_HEADER_BYTES
-from .gemini_transport import uses_vertex_express_api_key
+from ..realtime_provider import (
+    CoachSession,
+    SessionContext,
+    create_realtime_provider,
+)
 from .live_cost import MeetingCostTracker
 from .live_feedback_publisher import LiveFeedbackPublisher
 from .live_specialist import (
     LiveSpecialistRunner,
     SpecialistResult,
     SpecialistSnapshot,
+)
+from ..specialists import (
+    SpecialistFanout,
+    SpecialistOutput,
+    SpecialistTurnContext,
 )
 from .live_turn_graph import LiveTurnGraphs
 from .llm_state_validator import validate_llm_response
@@ -68,75 +78,6 @@ _QUEUE_RECV_CLOSED = object()
 # Fail-open: never block Live publish waiting for prosody.
 _PROSODY_PUBLISH_WAIT_S = 0.03
 _PROSODY_CACHE_MAX = 8
-
-EMIT_FEEDBACK_TOOL = {
-    'function_declarations': [
-        {
-            'name': 'emit_feedback',
-            'description': (
-                'Emit exactly one final coaching feedback for the just-finished '
-                'customer speech turn. Call once per turnId; each new turnId needs a '
-                'new call. Never reuse an old turnId. Never speak aloud — only call '
-                'this tool.'
-            ),
-            'parameters': {
-                'type': 'object',
-                'properties': {
-                    'turnId': {
-                        'type': 'string',
-                        'description': 'Opaque turn id provided by the server for this utterance.',
-                    },
-                    'feedback': {
-                        'type': 'string',
-                        'description': 'Short actionable coaching tip for the seller, or empty if none.',
-                    },
-                    'confidence': {
-                        'type': 'number',
-                        'description': 'Confidence 0..1',
-                    },
-                    'feedback_type': {
-                        'type': 'string',
-                        'description': (
-                            'objection|opportunity|rapport|closing|clarification|risk|null'
-                        ),
-                    },
-                    'evidence_text': {
-                        'type': 'string',
-                        'description': 'Short literal quote from the customer speech.',
-                    },
-                    'estado': {
-                        'type': 'object',
-                        'description': 'Partial conversation state delta.',
-                    },
-                    'playbook_template_key': {
-                        'type': 'string',
-                    },
-                    'playbook_variables': {
-                        'type': 'object',
-                    },
-                },
-                'required': [
-                    'turnId',
-                    'feedback',
-                    'confidence',
-                    'feedback_type',
-                    'evidence_text',
-                    'estado',
-                ],
-            },
-        },
-    ],
-}
-
-SYSTEM_INSTRUCTION = (
-    'Você é um copiloto de vendas de baixa latência. Ouça o áudio do CLIENTE. '
-    'Sempre que um turno de fala do cliente terminar, chame emit_feedback exatamente '
-    'uma vez com o turnId daquele turno. Cada novo turnId é um turno novo — chame de '
-    'novo. Nunca reutilize um turnId antigo. Nunca responda por voz. Se não houver '
-    'feedback útil, chame emit_feedback com feedback="" e confidence=0. Priorize '
-    'objection, opportunity, rapport, closing, clarification e risk.'
-)
-
 
 def _extract_pcm(wav_or_pcm: bytes) -> bytes:
     if len(wav_or_pcm) >= WAV_HEADER_BYTES and wav_or_pcm[:4] == b'RIFF':
@@ -189,6 +130,8 @@ class _MeetingSession:
     prosody_by_turn: dict[str, ProsodySnapshot] = field(default_factory=dict)
     last_distinctive_prosody: Optional[ProsodySnapshot] = None
     _prosody_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
+    precomputed_playbook_nudge: str = ''
+    selected_specialists: tuple[str, ...] = ()
 
 
 class GeminiLiveManager:
@@ -211,9 +154,22 @@ class GeminiLiveManager:
         catalog_cache: Optional[PlaybookCatalogCache] = None,
         turn_graphs: Optional[LiveTurnGraphs] = None,
         specialist_runner: Optional[LiveSpecialistRunner] = None,
+        specialist_fanout: Optional[SpecialistFanout] = None,
+        live_provider: str = 'gemini',
+        provider: Optional[Any] = None,
+        key_pool: Optional[Any] = None,
+        meeting_state: Optional[Any] = None,
     ) -> None:
         self._api_key = (api_key or '').strip()
         self._model_name = model_name
+        self._key_pool = key_pool
+        self._meeting_state = meeting_state
+        self._provider = provider or create_realtime_provider(
+            name=live_provider,
+            api_key=self._api_key,
+            model_name=model_name,
+            context_window_tokens=context_window_tokens,
+        )
         self._publisher = publisher
         self._max_cost = max_cost_usd_per_meeting
         self._alert_cost = alert_cost_usd
@@ -226,12 +182,46 @@ class GeminiLiveManager:
         self._catalog_cache = catalog_cache
         self._turn_graphs = turn_graphs
         self._specialist_runner = specialist_runner
+        self._specialist_fanout = specialist_fanout
 
         self._lock = threading.Lock()
         self._sessions: dict[str, _MeetingSession] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+
+    def _resolve_api_key(self, tenant_id: str) -> str:
+        if self._key_pool is not None:
+            try:
+                key = self._key_pool.resolve_api_key(tenant_id)
+                if key:
+                    return key
+            except Exception:
+                logger.exception('live key pool resolve failed')
+        return self._api_key
+
+    def _admit(self) -> bool:
+        if len(self._sessions) >= self._max_sessions:
+            LIVE_ADMISSION_REJECTED_TOTAL.labels(reason='max_sessions').inc()
+            logger.warning(
+                'Live admission rejected | reason=max_sessions | max=%s',
+                self._max_sessions,
+            )
+            return False
+        try:
+            load1 = os.getloadavg()[0]
+            cpus = float(os.cpu_count() or 1)
+            if load1 > cpus * 1.5:
+                LIVE_ADMISSION_REJECTED_TOTAL.labels(reason='load').inc()
+                logger.warning(
+                    'Live admission rejected | reason=load | load1=%.2f | cpus=%s',
+                    load1,
+                    cpus,
+                )
+                return False
+        except OSError:
+            pass
+        return True
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -254,8 +244,8 @@ class GeminiLiveManager:
         if self._specialist_runner is not None:
             self._specialist_runner.shutdown(wait=True)
 
-    def set_specialist_runner(self, runner: LiveSpecialistRunner) -> None:
-        self._specialist_runner = runner
+    def set_specialist_fanout(self, fanout: SpecialistFanout) -> None:
+        self._specialist_fanout = fanout
 
     def is_available(self, meeting_id: str) -> bool:
         with self._lock:
@@ -287,23 +277,23 @@ class GeminiLiveManager:
         tenant_id: str,
         sample_rate: int = 16000,
         channels: int = 1,
+        wait_ready: bool = False,
+        selected_specialists: Optional[tuple[str, ...]] = None,
     ) -> bool:
-        if not self._api_key:
+        if not self._resolve_api_key(tenant_id):
             return False
         with self._lock:
             existing = self._sessions.get(meeting_id)
             if existing is not None:
+                if selected_specialists is not None:
+                    existing.selected_specialists = selected_specialists
                 return existing.available and not existing.cost.limited
-            if len(self._sessions) >= self._max_sessions:
-                logger.warning(
-                    'Live max concurrent sessions reached | max=%s',
-                    self._max_sessions,
-                )
+            if not self._admit():
                 return False
             session = _MeetingSession(
                 meeting_id=meeting_id,
                 tenant_id=tenant_id,
-                api_key=self._api_key,
+                api_key=self._resolve_api_key(tenant_id),
                 model_name=self._model_name,
                 cost=MeetingCostTracker(
                     meeting_id=meeting_id,
@@ -320,13 +310,80 @@ class GeminiLiveManager:
                 opened_wall_ms=int(time.time() * 1000),
                 sample_rate=sample_rate,
                 channels=channels,
+                selected_specialists=selected_specialists or (),
             )
             self._sessions[meeting_id] = session
 
-        # Warm playbook catalog off the audio hot path (once per meeting).
-        if self._catalog_cache is not None and tenant_id:
+        if self._meeting_state is not None:
+            host = self._meeting_state.get_host_context(tenant_id, meeting_id)
+            if host:
+                session.context_summary = host
+
+        self._load_catalog(session, tenant_id, blocking=False)
+
+        loop = self._wait_for_loop()
+        if loop is None:
+            return False
+        fut = asyncio.run_coroutine_threadsafe(self._start_session(session), loop)
+        if not wait_ready:
+            return True
+        try:
+            fut.result(timeout=15.0)
+            return True
+        except Exception:
+            logger.exception('Failed to start Live session | meeting=%s', meeting_id)
+            self.mark_unavailable(meeting_id, 'start_failed')
+            return False
+
+    def warm_session(
+        self,
+        *,
+        meeting_id: str,
+        tenant_id: str,
+        sample_rate: int = 16000,
+        channels: int = 1,
+        selected_specialists: Optional[tuple[str, ...]] = None,
+    ) -> bool:
+        """Open Live + prefetch catalogs on WS connect, before first speech."""
+        return self.ensure_session(
+            meeting_id=meeting_id,
+            tenant_id=tenant_id,
+            sample_rate=sample_rate,
+            channels=channels,
+            wait_ready=False,
+            selected_specialists=selected_specialists,
+        )
+
+    def set_selected_specialists(
+        self,
+        meeting_id: str,
+        keys: tuple[str, ...],
+    ) -> None:
+        with self._lock:
+            session = self._sessions.get(meeting_id)
+            if session is None:
+                return
+            session.selected_specialists = tuple(k for k in keys if k)
+
+    def _load_catalog(
+        self,
+        session: _MeetingSession,
+        tenant_id: str,
+        *,
+        blocking: bool,
+    ) -> None:
+        if self._catalog_cache is None or not tenant_id:
+            return
+
+        def _apply() -> None:
             try:
-                templates = self._catalog_cache.get(tenant_id)
+                templates = (
+                    self._catalog_cache.get(tenant_id)
+                    if blocking
+                    else self._catalog_cache.get_cached(tenant_id)
+                )
+                if not templates and not blocking:
+                    templates = self._catalog_cache.get(tenant_id)
                 n = len(templates)
                 session.playbook_index = None
                 session.retrieve_query_hint = ''
@@ -347,7 +404,7 @@ class GeminiLiveManager:
                     'playbook.catalog_loaded | tenant=%s | meeting=%s | n=%s | '
                     'retrieve=%s',
                     tenant_id,
-                    meeting_id,
+                    session.meeting_id,
                     n,
                     bool(session.playbook_index),
                 )
@@ -355,20 +412,17 @@ class GeminiLiveManager:
                 logger.exception(
                     'playbook.catalog_warm_failed | tenant=%s | meeting=%s',
                     tenant_id,
-                    meeting_id,
+                    session.meeting_id,
                 )
 
-        loop = self._wait_for_loop()
-        if loop is None:
-            return False
-        fut = asyncio.run_coroutine_threadsafe(self._start_session(session), loop)
-        try:
-            fut.result(timeout=15.0)
-            return True
-        except Exception:
-            logger.exception('Failed to start Live session | meeting=%s', meeting_id)
-            self.mark_unavailable(meeting_id, 'start_failed')
-            return False
+        if blocking:
+            _apply()
+            return
+        threading.Thread(
+            target=_apply,
+            name=f'catalog-warm-{session.meeting_id[:12]}',
+            daemon=True,
+        ).start()
 
     def push_audio(
         self,
@@ -443,6 +497,8 @@ class GeminiLiveManager:
         self._publisher.clear_meeting(meeting_id)
         if self._specialist_runner is not None:
             self._specialist_runner.clear_meeting(meeting_id)
+        if self._specialist_fanout is not None:
+            self._specialist_fanout.clear_meeting(meeting_id)
         if loop is not None:
             asyncio.run_coroutine_threadsafe(self._close_session(session), loop)
 
@@ -460,6 +516,45 @@ class GeminiLiveManager:
             if session is None:
                 return
             session.context_summary = text[:1500]
+            tenant_id = session.tenant_id
+        if self._meeting_state is not None:
+            self._meeting_state.set_host_context(tenant_id, meeting_id, text)
+
+    def handle_specialist_outputs(
+        self,
+        ctx: SpecialistTurnContext,
+        outputs: list[SpecialistOutput],
+    ) -> None:
+        hints: list[str] = []
+        for item in outputs:
+            if item.next_turn_hint:
+                hints.append(item.next_turn_hint)
+            if not item.secondary_feedback:
+                continue
+            self._publisher.publish_secondary_feedback(
+                meeting_id=ctx.meeting_id,
+                tenant_id=ctx.tenant_id,
+                participant_id=ctx.participant_id,
+                participant_role=ctx.participant_role,
+                parent_turn_id=ctx.turn_id,
+                speech_end_ms=ctx.speech_end_ms,
+                feedback=item.secondary_feedback,
+                confidence=item.confidence,
+                feedback_type=item.secondary_feedback_type,
+                evidence_text=item.evidence_text,
+                state={
+                    **ctx.conversation_state,
+                    '_feedbackTier': 'secondary',
+                    '_parentTurnId': ctx.turn_id,
+                    '_specialist': item.metadata,
+                },
+                specialist_metadata=item.metadata,
+            )
+        if hints:
+            with self._lock:
+                session = self._sessions.get(ctx.meeting_id)
+                if session is not None:
+                    session.specialist_hint = ' | '.join(hints)[:1200]
 
     def handle_specialist_result(
         self,
@@ -498,6 +593,8 @@ class GeminiLiveManager:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self._loop = loop
+        if self._specialist_fanout is not None:
+            self._specialist_fanout.attach_loop(loop)
         try:
             while not self._stop.is_set():
                 loop.run_until_complete(asyncio.sleep(0.2))
@@ -543,26 +640,26 @@ class GeminiLiveManager:
         LIVE_SESSIONS_CLOSED_TOTAL.inc()
 
     async def _session_loop(self, session: _MeetingSession) -> None:
-        from google import genai
-        from google.genai import types
-
-        client = genai.Client(
-            api_key=session.api_key,
-            vertexai=uses_vertex_express_api_key(session.api_key),
-        )
         LIVE_SESSIONS_STARTED_TOTAL.inc()
         LIVE_SESSIONS_OPEN.inc()
         session.opened_wall_ms = int(time.time() * 1000)
-
-        config = self._build_config(types, session)
+        ctx = SessionContext(
+            meeting_id=session.meeting_id,
+            tenant_id=session.tenant_id,
+            sample_rate=session.sample_rate,
+            channels=session.channels,
+            catalog_prompt=session.catalog_prompt,
+            resumption_handle=session.resumption_handle,
+            context_window_tokens=self._context_window_tokens,
+            api_key=session.api_key,
+        )
         try:
-            async with client.aio.live.connect(
-                model=session.model_name,
-                config=config,
-            ) as live:
+            async with self._provider.open_session(ctx) as coach:
                 if session.resumption_handle:
                     LIVE_SESSIONS_RESUMED_TOTAL.inc()
-                recv_task = asyncio.create_task(self._receive_loop(session, live, types))
+                recv_task = asyncio.create_task(
+                    self._receive_loop(session, coach),
+                )
                 try:
                     while session.available:
                         item = await self._wait_queue_item(session, recv_task)
@@ -573,18 +670,17 @@ class GeminiLiveManager:
                         if item is _QUEUE_RECV_CLOSED:
                             session.awaiting_tool = False
                             break
-                        # Legacy queue item — host context must not hit realtime mid-call.
                         if isinstance(item, tuple) and item and item[0] == 'host_context':
                             continue
                         event, meta = item
                         assert isinstance(event, VadEvent)
-                        await self._handle_vad_event(session, live, types, event, meta)
+                        await self._handle_vad_event(session, coach, event, meta)
                         if session.cost.limited:
                             LIVE_COST_LIMIT_TRIPS_TOTAL.inc()
                             self.mark_unavailable(session.meeting_id, 'cost_limit')
                             break
                         if self._should_rotate(session):
-                            # Rotate between turns only.
+                            # Rotate between turns only — never mid-utterance.
                             if not session.vad.speaking and not session.awaiting_tool:
                                 session.resumption_handle = None
                                 break
@@ -604,7 +700,6 @@ class GeminiLiveManager:
         finally:
             LIVE_SESSIONS_OPEN.dec()
 
-        # Soft rotate: reopen if still marked available and under cost.
         with self._lock:
             still = self._sessions.get(session.meeting_id)
         if still is session and session.available and not session.cost.limited:
@@ -640,77 +735,34 @@ class GeminiLiveManager:
                 get_task.cancel()
             raise
 
-    def _build_config(self, types: Any, session: _MeetingSession) -> Any:
-        thinking = None
-        try:
-            thinking = types.ThinkingConfig(thinking_level='minimal')
-        except Exception:
-            thinking = None
-
-        system_instruction = SYSTEM_INSTRUCTION
-        if session.catalog_prompt:
-            system_instruction = f'{SYSTEM_INSTRUCTION}\n\n{session.catalog_prompt}'
-
-        kwargs: dict[str, Any] = {
-            'response_modalities': ['AUDIO'],
-            'system_instruction': system_instruction,
-            'tools': [EMIT_FEEDBACK_TOOL],
-            'realtime_input_config': {
-                'automatic_activity_detection': {'disabled': True},
-            },
-            'context_window_compression': {
-                'sliding_window': {},
-                'trigger_tokens': self._context_window_tokens,
-            },
-        }
-        if thinking is not None:
-            kwargs['thinking_config'] = thinking
-        if session.resumption_handle:
-            kwargs['session_resumption'] = {'handle': session.resumption_handle}
-        else:
-            kwargs['session_resumption'] = {}
-        try:
-            return types.LiveConnectConfig(**kwargs)
-        except Exception:
-            # Older SDK shapes: plain dict is accepted by connect().
-            return kwargs
-
     async def _handle_vad_event(
         self,
         session: _MeetingSession,
-        live: Any,
-        types: Any,
+        coach: CoachSession,
         event: VadEvent,
         meta: dict[str, str],
     ) -> None:
         if event.kind == 'activity_start':
             session.turn_pcm.clear()
+            session.precomputed_playbook_nudge = ''
             logger.info(
                 'live.vad.start | meeting=%s | turnId=%s',
                 session.meeting_id,
                 event.turn_id,
             )
-            async with session.send_lock:
-                await live.send_realtime_input(activity_start=types.ActivityStart())
-                await live.send_realtime_input(
-                    text=(
-                        f'Turno iniciado. turnId="{event.turn_id}". '
-                        'Ao final deste turno chame emit_feedback uma única vez '
-                        'com este turnId.'
-                    ),
-                )
+            await coach.send_activity('start')
+            await coach.send_text(
+                f'Turno iniciado. turnId="{event.turn_id}". '
+                'Ao final deste turno chame emit_feedback uma única vez '
+                'com este turnId.',
+            )
             return
 
         if event.kind == 'audio' and event.pcm:
             self._append_turn_pcm(session, event.pcm)
-            async with session.send_lock:
-                await live.send_realtime_input(
-                    audio=types.Blob(
-                        data=event.pcm,
-                        mime_type='audio/pcm;rate=16000',
-                    ),
-                )
+            await coach.send_audio(event.pcm)
             LIVE_AUDIO_BYTES_SENT_TOTAL.inc(len(event.pcm))
+            self._precompute_playbook_nudge(session)
             return
 
         if event.kind == 'activity_end':
@@ -741,27 +793,42 @@ class GeminiLiveManager:
                 self._consume_specialist_hint(session),
             ]
             context_nudge = '\n'.join(item for item in context_nudges if item)
+            graph_started = time.perf_counter()
             if self._turn_graphs is not None:
+                precomputed = session.precomputed_playbook_nudge
                 pre_state = await self._turn_graphs.run_pre_tool(
                     {
                         'participant_role': meta['participant_role'],
                         'signal_valid': True,
                         'base_nudge': base_nudge,
-                        'retrieve_fn': lambda: self._playbook_candidates_nudge(session),
+                        'retrieve_fn': (
+                            (lambda: precomputed)
+                            if precomputed
+                            else (lambda: self._playbook_candidates_nudge(session))
+                        ),
                         'prosody_nudge': context_nudge,
                     },
                 )
                 nudge = str(pre_state.get('nudge') or base_nudge)
             else:
                 nudge = base_nudge
-                candidates = self._playbook_candidates_nudge(session)
+                candidates = (
+                    session.precomputed_playbook_nudge
+                    or self._playbook_candidates_nudge(session)
+                )
                 if candidates:
                     nudge = f'{nudge}\n{candidates}'
                 if context_nudge:
                     nudge = f'{nudge}\n{context_nudge}'
-            async with session.send_lock:
-                await live.send_realtime_input(activity_end=types.ActivityEnd())
-                await live.send_realtime_input(text=nudge)
+            LIVE_STAGE_MS.labels(stage='graph_ms').observe(
+                (time.perf_counter() - graph_started) * 1000.0,
+            )
+            send_started = time.perf_counter()
+            await coach.send_activity('end')
+            await coach.send_text(nudge)
+            LIVE_STAGE_MS.labels(stage='vad_end_to_provider_send').observe(
+                (time.perf_counter() - send_started) * 1000.0,
+            )
             return
 
     @staticmethod
@@ -876,14 +943,18 @@ class GeminiLiveManager:
             return session.prosody_by_turn.get(turn_id)
         return session.prosody_by_turn.get(turn_id)
 
-    async def _receive_loop(self, session: _MeetingSession, live: Any, types: Any) -> None:
+    async def _receive_loop(self, session: _MeetingSession, coach: CoachSession) -> None:
         # google-genai AsyncSession.receive() ends after each turn_complete.
         # Outer while restarts so subsequent client turns still get tool calls.
-        # See https://github.com/googleapis/python-genai/issues/1224
         while session.available:
             try:
-                async for response in live.receive():
-                    await self._handle_server_message(session, live, types, response)
+                recv_started = time.perf_counter()
+                async for response in coach.receive():
+                    await self._handle_server_message(session, coach, response)
+                    if getattr(response, 'tool_call', None) is not None:
+                        LIVE_STAGE_MS.labels(stage='provider_rtt').observe(
+                            (time.perf_counter() - recv_started) * 1000.0,
+                        )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -897,8 +968,7 @@ class GeminiLiveManager:
     async def _handle_server_message(
         self,
         session: _MeetingSession,
-        live: Any,
-        types: Any,
+        coach: CoachSession,
         response: Any,
     ) -> None:
         usage = getattr(response, 'usage_metadata', None)
@@ -938,40 +1008,17 @@ class GeminiLiveManager:
             session.awaiting_tool = False
             session.model_turn_done.set()
 
-        tool_call = getattr(response, 'tool_call', None)
-        if tool_call is None:
+        parsed = coach.parse_tool_calls(response)
+        if not parsed:
             return
 
-        function_responses = []
-        for fc in getattr(tool_call, 'function_calls', None) or []:
-            name = getattr(fc, 'name', '') or ''
-            args = getattr(fc, 'args', None) or {}
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except Exception:
-                    args = {}
-            if not isinstance(args, dict):
-                args = {}
-
+        for name, args, _fc in parsed:
             if name == 'emit_feedback':
                 await self._on_emit_feedback(session, args)
 
-            function_responses.append(
-                types.FunctionResponse(
-                    id=getattr(fc, 'id', None) or str(uuid.uuid4()),
-                    name=name or 'emit_feedback',
-                    response={'result': 'ok'},
-                ),
-            )
-
-        if function_responses:
-            async with session.send_lock:
-                await live.send_tool_response(function_responses=function_responses)
-            # Release next VAD turn immediately — turn_complete often never
-            # arrives for tool-only replies and used to cost a 2s start_timeout.
-            session.awaiting_tool = False
-            session.model_turn_done.set()
+        await coach.ack_tools([fc for _name, _args, fc in parsed])
+        session.awaiting_tool = False
+        session.model_turn_done.set()
 
     async def _on_emit_feedback(
         self,
@@ -1025,6 +1072,27 @@ class GeminiLiveManager:
                 prosody=prosody_value,
             )
 
+        def enqueue_specialists() -> bool:
+            if self._specialist_fanout is None:
+                return False
+            validated = validate_llm_response(args)
+            return self._specialist_fanout.enqueue(
+                SpecialistTurnContext(
+                    tenant_id=meta.tenant_id,
+                    meeting_id=meta.meeting_id,
+                    participant_id=meta.participant_id,
+                    participant_role=meta.participant_role,
+                    turn_id=turn_id,
+                    speech_end_ms=speech_end_ms,
+                    evidence_text=(validated.evidence_text or '').strip(),
+                    primary_feedback=(validated.direct_feedback or '').strip(),
+                    conversation_state=validated.estado.to_dict(),
+                    host_context=session.context_summary,
+                    selected_keys=session.selected_specialists,
+                ),
+            )
+
+        publish_started = time.perf_counter()
         if self._turn_graphs is not None:
             post_state = await self._turn_graphs.run_post_tool(
                 {
@@ -1032,6 +1100,7 @@ class GeminiLiveManager:
                     'args': args,
                     'await_prosody_fn': lambda: self._await_prosody(session, turn_id),
                     'publish_fn': publish_primary,
+                    'specialist_enqueue_fn': enqueue_specialists,
                 },
             )
             prosody = post_state.get('prosody')
@@ -1039,6 +1108,11 @@ class GeminiLiveManager:
         else:
             prosody = await self._await_prosody(session, turn_id)
             published = await asyncio.to_thread(publish_primary, prosody)
+            if published:
+                enqueue_specialists()
+        LIVE_STAGE_MS.labels(stage='publish_ms').observe(
+            (time.perf_counter() - publish_started) * 1000.0,
+        )
 
         # Best-effort prosody merge; fail-open if analysis still running.
         if prosody is not None:
@@ -1064,7 +1138,7 @@ class GeminiLiveManager:
             turn_id,
             published,
         )
-        if published and self._specialist_runner is not None:
+        if published and self._specialist_fanout is None and self._specialist_runner is not None:
             validated = validate_llm_response(args)
             self._specialist_runner.enqueue(
                 SpecialistSnapshot(
@@ -1107,6 +1181,12 @@ class GeminiLiveManager:
                 elapsed_ms,
             )
         return format_retrieve_nudge(hits)
+
+    def _precompute_playbook_nudge(self, session: _MeetingSession) -> None:
+        """Refresh playbook retrieve during speech so activity_end is a concat."""
+        if session.playbook_index is None:
+            return
+        session.precomputed_playbook_nudge = self._playbook_candidates_nudge(session)
 
     def _should_rotate(self, session: _MeetingSession) -> bool:
         if session.rotation_minutes <= 0:

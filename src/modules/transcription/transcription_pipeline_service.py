@@ -30,8 +30,7 @@ from ...metrics.realtime_metrics import (
 )
 from ..acoustic_fingerprint.correlation_metrics import CORRELATION_METRICS
 from .live_host_observe import should_skip_live_host_observe
-from .partial_turn_coordinator import FinalAction, PartialTurnCoordinator
-from .transcription_service import TranscriptionService
+from .partial_turn_coordinator import FinalAction
 from .utterance_completeness import text_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -134,12 +133,12 @@ class TranscriptionPipelineService:
 
     def __init__(
         self,
-        transcription_service: Optional[TranscriptionService],
+        transcription_service: Optional[Any],
         text_analysis_service: TextAnalysisService,
         publish_dispatcher: PublishDispatcher,
         default_language: Optional[str] = None,
         *,
-        partial_coordinator: Optional[PartialTurnCoordinator] = None,
+        partial_coordinator: Optional[Any] = None,
         partial_min_confidence: float = 0.7,
         feedback_allow_host_publish: bool = False,
         acoustic_routing_enabled: bool = True,

@@ -1,6 +1,12 @@
-# 🚀 Self-Hosted Deployment Guide
+# python-service — realtime coaching
 
-Complete setup guide for running the Meet Sales Co-pilot with **100% FREE LLM** using Ollama.
+Hot path: Desktop WSS → Gemini Live (`LIVE_PROVIDER`) → overlay. Fallback multimodal para host. Redis para escala horizontal.
+
+Não usa Ollama, AssemblyAI nem inbound `StreamAudio`.
+
+## Local
+
+`REDIS_URL` (compose: `redis://redis:6379/0`), `AUDIO_ANALYSIS_MODE=live`, `LLM_PROVIDER=gemini`, `DESKTOP_WS_ENABLED=true`.
 
 ## 📋 Prerequisites
 

@@ -47,6 +47,7 @@ class LiveFeedbackPublisher:
         secondary_cooldown_ms: int = 15_000,
         secondary_max_age_ms: int = 120_000,
         secondary_types: tuple[str, ...] = ('risk', 'objection'),
+        meeting_state: Optional[Any] = None,
     ) -> None:
         self._publish_dispatcher = publish_dispatcher
         self._min_confidence = min_confidence
@@ -55,6 +56,7 @@ class LiveFeedbackPublisher:
         self._secondary_cooldown_ms = secondary_cooldown_ms
         self._secondary_max_age_ms = secondary_max_age_ms
         self._secondary_types = frozenset(secondary_types)
+        self._meeting_state = meeting_state
         self._lock = threading.Lock()
         self._seen_turns: Set[str] = set()
         self._secondary_fingerprints: dict[str, int] = {}
@@ -119,6 +121,15 @@ class LiveFeedbackPublisher:
             return False
 
         evidence = (validated.evidence_text or '').strip()
+        if self._meeting_state is not None:
+            try:
+                self._meeting_state.set_conversation(
+                    tenant_id,
+                    meeting_id,
+                    validated.estado.to_dict(),
+                )
+            except Exception:
+                logger.exception('meeting state persist failed')
         analysis = TextAnalysisResult(
             direct_feedback=feedback,
             conversation_state_json=json.dumps(

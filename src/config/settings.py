@@ -43,7 +43,7 @@ class Settings:
     # `multimodal` sends bounded PCM windows directly to Gemini. `transcript`
     # preserves AssemblyAI/local STT as a rollback path. `live` uses Gemini Live
     # for client audio (sub-second best-effort) with multimodal as degraded fallback.
-    audio_analysis_mode: str = 'transcript'
+    audio_analysis_mode: str = 'live'
     audio_analysis_client_interval_ms: int = 7000
     audio_analysis_host_interval_ms: int = 20000
     audio_analysis_overlap_ms: int = 750
@@ -53,12 +53,13 @@ class Settings:
     live_min_speech_ms: int = 400
     live_max_cost_usd_per_meeting: float = 3.0
     live_alert_cost_usd: float = 1.0
-    live_max_concurrent_sessions: int = 20
+    live_max_concurrent_sessions: int = 200
     live_context_window_tokens: int = 12_000
     live_session_rotation_minutes: float = 2.0
     live_host_observe_interval_ms: int = 15_000
+    live_provider: str = 'gemini'
     live_langgraph_enabled: bool = True
-    live_specialist_enabled: bool = False
+    live_specialist_enabled: bool = True
     live_specialist_model: str = 'gemini-2.5-flash'
     live_specialist_queue_max_size: int = 32
     live_specialist_timeout_ms: int = 8_000
@@ -115,7 +116,7 @@ class Settings:
     # Binds to PORT (Cloud Run / platform public port). gRPC stays on GRPC_PORT.
     desktop_ws_enabled: bool = False
     port: int = 8765
-    desktop_ws_coalesce_ms: int = 100
+    desktop_ws_coalesce_ms: int = 40
     desktop_ws_require_auth: bool = True
     # Same key material the backend uses (JWT_PUBLIC_KEY RS256 prod,
     # JWT_SECRET HS256 dev) so the gateway validates identical access tokens.
@@ -123,6 +124,7 @@ class Settings:
     jwt_secret: Optional[str] = None
     jwt_issuer: str = 'meet-backend'
     jwt_audience: str = 'meet-platform'
+    redis_url: Optional[str] = None
     metrics_enabled: bool = True
     metrics_port: int = 9100
     log_level: str = 'INFO'
@@ -135,7 +137,7 @@ class Settings:
     # LLM Configuration
     # ===========================================
     # LLM Provider: 'ollama' (free, local) or 'gemini' (Google API)
-    llm_provider: str = 'ollama'
+    llm_provider: str = 'gemini'
     
     # Ollama settings (for local free inference)
     ollama_base_url: str = 'http://localhost:11434'
@@ -231,7 +233,7 @@ class Settings:
             stt_provider=os.getenv('STT_PROVIDER', 'assemblyai').strip().lower(),
             audio_analysis_mode=os.getenv(
                 'AUDIO_ANALYSIS_MODE',
-                'transcript',
+                'live',
             ).strip().lower(),
             audio_analysis_client_interval_ms=int(
                 os.getenv('AUDIO_ANALYSIS_CLIENT_INTERVAL_MS', '7000'),
@@ -260,7 +262,7 @@ class Settings:
                 os.getenv('LIVE_ALERT_COST_USD', '1.0'),
             ),
             live_max_concurrent_sessions=int(
-                os.getenv('LIVE_MAX_CONCURRENT_SESSIONS', '20'),
+                os.getenv('LIVE_MAX_CONCURRENT_SESSIONS', '200'),
             ),
             live_context_window_tokens=int(
                 os.getenv('LIVE_CONTEXT_WINDOW_TOKENS', '12000'),
@@ -271,6 +273,9 @@ class Settings:
             live_host_observe_interval_ms=int(
                 os.getenv('LIVE_HOST_OBSERVE_INTERVAL_MS', '15000'),
             ),
+            live_provider=(
+                os.getenv('LIVE_PROVIDER', 'gemini').strip().lower() or 'gemini'
+            ),
             live_langgraph_enabled=os.getenv(
                 'LIVE_LANGGRAPH_ENABLED',
                 'true',
@@ -278,7 +283,7 @@ class Settings:
             == 'true',
             live_specialist_enabled=os.getenv(
                 'LIVE_SPECIALIST_ENABLED',
-                'false',
+                'true',
             ).lower()
             == 'true',
             live_specialist_model=os.getenv(
@@ -411,7 +416,7 @@ class Settings:
             desktop_ws_enabled=os.getenv('DESKTOP_WS_ENABLED', 'false').lower()
             == 'true',
             port=int(os.getenv('PORT', '8765')),
-            desktop_ws_coalesce_ms=int(os.getenv('DESKTOP_WS_COALESCE_MS', '100')),
+            desktop_ws_coalesce_ms=int(os.getenv('DESKTOP_WS_COALESCE_MS', '40')),
             desktop_ws_require_auth=os.getenv(
                 'DESKTOP_WS_REQUIRE_AUTH',
                 'true',
@@ -423,13 +428,14 @@ class Settings:
             or 'meet-backend',
             jwt_audience=os.getenv('JWT_AUDIENCE', 'meet-platform').strip()
             or 'meet-platform',
+            redis_url=(os.getenv('REDIS_URL') or '').strip() or None,
             metrics_enabled=os.getenv('METRICS_ENABLED', 'true').lower() == 'true',
             metrics_port=int(os.getenv('METRICS_PORT', '9100')),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             proto_dir=os.getenv('PROTO_DIR'),
             preload_ml_models=os.getenv('PRELOAD_ML_MODELS', 'true').lower() == 'true',
             # LLM Provider settings
-            llm_provider=os.getenv('LLM_PROVIDER', 'ollama').lower(),
+            llm_provider=os.getenv('LLM_PROVIDER', 'gemini').lower(),
             ollama_base_url=os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434'),
             ollama_model=os.getenv('OLLAMA_MODEL', 'llama3.1:8b'),
             ollama_timeout=int(os.getenv('OLLAMA_TIMEOUT', '30')),
@@ -585,15 +591,10 @@ class Settings:
             )
         if not self.log_level.upper() in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']:
             raise ValueError(f'Invalid LOG_LEVEL: {self.log_level}')
-        if self.stt_provider not in {'assemblyai', 'local'}:
-            raise ValueError(
-                f'Invalid STT_PROVIDER: {self.stt_provider}. '
-                'Expected "assemblyai" or "local".',
-            )
-        if self.audio_analysis_mode not in {'transcript', 'multimodal', 'live'}:
+        if self.audio_analysis_mode not in {'multimodal', 'live'}:
             raise ValueError(
                 f'Invalid AUDIO_ANALYSIS_MODE: {self.audio_analysis_mode}. '
-                'Expected "transcript", "multimodal", or "live".',
+                'Expected "multimodal" or "live".',
             )
         if self.audio_analysis_client_interval_ms < 1000:
             raise ValueError('AUDIO_ANALYSIS_CLIENT_INTERVAL_MS must be >= 1000.')
@@ -622,6 +623,10 @@ class Settings:
                 raise ValueError('LIVE_SESSION_ROTATION_MINUTES must be > 0.')
             if self.live_host_observe_interval_ms < 0:
                 raise ValueError('LIVE_HOST_OBSERVE_INTERVAL_MS must be >= 0.')
+            if self.live_provider not in {'gemini'}:
+                raise ValueError(
+                    f'Invalid LIVE_PROVIDER: {self.live_provider}. Expected "gemini".',
+                )
             if self.live_specialist_queue_max_size < 1:
                 raise ValueError('LIVE_SPECIALIST_QUEUE_MAX_SIZE must be >= 1.')
             if self.live_specialist_timeout_ms < 100:
@@ -642,57 +647,6 @@ class Settings:
                 raise ValueError(
                     'LIVE_SECONDARY_FEEDBACK_TYPES supports only risk,objection.',
                 )
-        if self.audio_analysis_mode == 'transcript' and self.stt_provider == 'assemblyai':
-            if not (self.assemblyai_api_key or '').strip():
-                raise ValueError(
-                    'STT_PROVIDER=assemblyai requires ASSEMBLYAI_API_KEY.',
-                )
-            if self.assemblyai_sample_rate < 8000:
-                raise ValueError(
-                    f'Invalid ASSEMBLYAI_SAMPLE_RATE: {self.assemblyai_sample_rate}',
-                )
-            if self.assemblyai_stream_idle_timeout_ms < 1000:
-                raise ValueError(
-                    'Invalid ASSEMBLYAI_STREAM_IDLE_TIMEOUT_MS: '
-                    f'{self.assemblyai_stream_idle_timeout_ms}',
-                )
-            if self.assemblyai_reconnect_limit < 0:
-                raise ValueError(
-                    f'Invalid ASSEMBLYAI_RECONNECT_LIMIT: {self.assemblyai_reconnect_limit}',
-                )
-            if self.assemblyai_connect_timeout_seconds <= 0:
-                raise ValueError(
-                    'Invalid ASSEMBLYAI_CONNECT_TIMEOUT_SECONDS: '
-                    f'{self.assemblyai_connect_timeout_seconds}',
-                )
-            if self.assemblyai_termination_timeout_seconds < 0:
-                raise ValueError(
-                    'Invalid ASSEMBLYAI_TERMINATION_TIMEOUT_SECONDS: '
-                    f'{self.assemblyai_termination_timeout_seconds}',
-                )
-            if (
-                self.assemblyai_end_of_turn_confidence_threshold is not None
-                and not 0.0 <= self.assemblyai_end_of_turn_confidence_threshold <= 1.0
-            ):
-                raise ValueError(
-                    'Invalid ASSEMBLYAI_END_OF_TURN_CONFIDENCE_THRESHOLD: '
-                    f'{self.assemblyai_end_of_turn_confidence_threshold}',
-                )
-            if (
-                self.assemblyai_vad_threshold is not None
-                and not 0.0 <= self.assemblyai_vad_threshold <= 1.0
-            ):
-                raise ValueError(
-                    f'Invalid ASSEMBLYAI_VAD_THRESHOLD: {self.assemblyai_vad_threshold}',
-                )
-        if not -120.0 <= self.whisper_low_energy_dbfs <= 0.0:
-            raise ValueError(
-                f'Invalid WHISPER_LOW_ENERGY_DBFS: {self.whisper_low_energy_dbfs}',
-            )
-        if self.stt_process_workers < 0:
-            raise ValueError(
-                f'Invalid STT_PROCESS_WORKERS: {self.stt_process_workers}',
-            )
         if self.window_queue_max_size < 1:
             raise ValueError(
                 f'Invalid WINDOW_QUEUE_MAX_SIZE: {self.window_queue_max_size}',

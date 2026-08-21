@@ -1,5 +1,3 @@
-"""gRPC handlers."""
+"""gRPC handlers (inbound StreamAudio removed; Python only clients Nest)."""
 
-from .audio_handler import AudioPipelineServicer
-
-__all__ = ['AudioPipelineServicer']
+__all__: list[str] = []

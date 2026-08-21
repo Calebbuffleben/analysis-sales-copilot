@@ -21,8 +21,7 @@ import json
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
 from .feedback_hub import FeedbackHub
@@ -36,6 +35,8 @@ from ..modules.acoustic_fingerprint.pcm_v2 import (
 
 if TYPE_CHECKING:
     from ..services.audio_service import AudioService
+    from ..modules.text_analysis.gemini_live_session import GeminiLiveManager
+    from ..modules.playbooks.catalog_cache import PlaybookCatalogCache
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,7 @@ class _AudioStreamState:
         'acoustic_class',
         'matched_seller_id',
         'correlation_confidence',
+        'selected_specialists',
     )
 
     def __init__(
@@ -83,6 +85,7 @@ class _AudioStreamState:
         participant_role: str,
         seller_room_id: str = '',
         pcm_version: int = 1,
+        selected_specialists: tuple[str, ...] = (),
     ) -> None:
         self.meeting_id = meeting_id
         self.participant_id = participant_id
@@ -93,6 +96,7 @@ class _AudioStreamState:
         self.participant_role = participant_role
         self.seller_room_id = seller_room_id
         self.pcm_version = pcm_version
+        self.selected_specialists = selected_specialists
         self.label_buffer = AcousticLabelBuffer()
         self.buffer = bytearray()
         self.buffer_started_ms: Optional[int] = None
@@ -113,8 +117,11 @@ class DesktopWsGateway:
         authenticator: DesktopWsAuthenticator,
         feedback_hub: FeedbackHub,
         audio_service: 'AudioService',
-        coalesce_ms: int = 100,
+        coalesce_ms: int = 40,
         host: str = '0.0.0.0',
+        live_manager: Optional['GeminiLiveManager'] = None,
+        catalog_cache: Optional['PlaybookCatalogCache'] = None,
+        lifecycle_reporter: Optional[Callable[..., None]] = None,
     ) -> None:
         self._port = port
         self._host = host
@@ -122,10 +129,14 @@ class DesktopWsGateway:
         self._feedback_hub = feedback_hub
         self._audio_service = audio_service
         self._coalesce_ms = max(20, coalesce_ms)
+        self._live_manager = live_manager
+        self._catalog_cache = catalog_cache
+        self._lifecycle_reporter = lifecycle_reporter
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event: Optional[asyncio.Event] = None
         self._started = threading.Event()
+        self._connections: set[Any] = set()
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -155,9 +166,19 @@ class DesktopWsGateway:
         if loop is None or stop_event is None:
             return
         if not loop.is_closed():
-            loop.call_soon_threadsafe(stop_event.set)
+            asyncio.run_coroutine_threadsafe(self._drain_and_stop(), loop)
         if self._thread is not None:
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=8)
+
+    async def _drain_and_stop(self) -> None:
+        payload = json.dumps({'type': 'session-migrate'})
+        for connection in list(self._connections):
+            try:
+                await connection.send(payload)
+            except Exception:
+                pass
+        if self._stop_event is not None:
+            self._stop_event.set()
 
     def _run_loop(self) -> None:
         loop = asyncio.new_event_loop()
@@ -246,6 +267,7 @@ class DesktopWsGateway:
 
         tenant_id = auth.tenant_id or tenant_hint
 
+        self._connections.add(websocket)
         self._feedback_hub.register(tenant_id, meeting_id, websocket)
         try:
             if mode == 'feedback':
@@ -259,6 +281,7 @@ class DesktopWsGateway:
                     user_id=auth.user_id,
                 )
         finally:
+            self._connections.discard(websocket)
             self._feedback_hub.unregister(tenant_id, meeting_id, websocket)
 
     async def _run_feedback_connection(self, websocket: Any) -> None:
@@ -295,6 +318,11 @@ class DesktopWsGateway:
             channels = max(1, int(query.get('channels') or 1))
         except ValueError:
             channels = 1
+        selected_specialists = tuple(
+            _sanitize(item)
+            for item in (query.get('specialists') or '').split(',')
+            if item.strip()
+        )
 
         state = _AudioStreamState(
             meeting_id=meeting_id,
@@ -306,17 +334,26 @@ class DesktopWsGateway:
             participant_role=participant_role,
             seller_room_id=seller_room_id,
             pcm_version=pcm_version,
+            selected_specialists=selected_specialists,
         )
         flush_threshold_bytes = max(
             int(sample_rate * channels * 2 * 0.05),
             int(sample_rate * channels * 2 * (self._coalesce_ms / 1000.0)),
         )
-        # Single worker per connection: preserves chunk ordering for STT
-        # while keeping process_chunk off the event loop.
-        executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix=f'ws-audio-{participant_id[:16]}',
-        )
+        process_lock = asyncio.Lock()
+        if self._catalog_cache is not None and tenant_id:
+            asyncio.create_task(asyncio.to_thread(self._catalog_cache.warm, tenant_id))
+        if self._live_manager is not None and participant_role != 'host':
+            asyncio.create_task(
+                asyncio.to_thread(
+                    self._live_manager.warm_session,
+                    meeting_id=meeting_id,
+                    tenant_id=tenant_id,
+                    sample_rate=sample_rate,
+                    channels=channels,
+                    selected_specialists=selected_specialists,
+                ),
+            )
 
         logger.info(
             '🎙️ ws audio ingress started | meetingId=%s | participantId=%s | '
@@ -328,15 +365,27 @@ class DesktopWsGateway:
             channels,
             flush_threshold_bytes,
         )
+        self._report_lifecycle(
+            event='open',
+            tenant_id=tenant_id,
+            meeting_id=meeting_id,
+            user_id=user_id,
+            participant_id=participant_id,
+            participant_role=participant_role,
+            track=track,
+            sample_rate=sample_rate,
+            channels=channels,
+        )
+        opened_ms = int(time.time() * 1000)
 
         try:
             async for frame in websocket:
                 if isinstance(frame, (bytes, bytearray, memoryview)):
-                    self._on_audio_bytes(
+                    await self._on_audio_bytes(
                         state,
                         bytes(frame),
                         flush_threshold_bytes,
-                        executor,
+                        process_lock,
                     )
                 else:
                     # Text frames: ping or acoustic_label control.
@@ -344,16 +393,44 @@ class DesktopWsGateway:
         except Exception:
             logger.debug('ws audio connection closed with error', exc_info=True)
         finally:
-            # end_stream runs on the same single worker, AFTER pending chunks.
-            executor.submit(self._finish_audio_stream, state)
-            executor.shutdown(wait=False)
+            await asyncio.to_thread(self._finish_audio_stream, state)
+            self._report_lifecycle(
+                event='close',
+                tenant_id=tenant_id,
+                meeting_id=meeting_id,
+                user_id=user_id,
+                participant_id=participant_id,
+                participant_role=participant_role,
+                track=track,
+                sample_rate=sample_rate,
+                channels=channels,
+                duration_ms=max(0, int(time.time() * 1000) - opened_ms),
+                chunks_received=state.sequence,
+            )
 
-    def _on_control_message(self, websocket: Any, raw: str) -> None:
+    def _on_control_message(
+        self,
+        websocket: Any,
+        raw: str,
+        state: Optional[_AudioStreamState] = None,
+    ) -> None:
         try:
             message = json.loads(raw)
         except (TypeError, ValueError):
             return
         if not isinstance(message, dict):
+            return
+        if message.get('type') == 'set-specialists' and state is not None:
+            raw_keys = message.get('specialists') or message.get('keys') or []
+            if isinstance(raw_keys, str):
+                keys = tuple(_sanitize(item) for item in raw_keys.split(',') if item.strip())
+            elif isinstance(raw_keys, list):
+                keys = tuple(_sanitize(str(item)) for item in raw_keys if str(item).strip())
+            else:
+                keys = ()
+            state.selected_specialists = keys
+            if self._live_manager is not None:
+                self._live_manager.set_selected_specialists(state.meeting_id, keys)
             return
         if message.get('type') == 'ping' and websocket is not None:
             asyncio.get_running_loop().create_task(
@@ -370,7 +447,7 @@ class DesktopWsGateway:
     ) -> None:
         label = parse_label_control(raw)
         if label is None:
-            self._on_control_message(websocket, raw)
+            self._on_control_message(websocket, raw, state)
             return
         state.label_buffer.upsert(label)
         state.acoustic_class = label.acoustic_class
@@ -381,12 +458,21 @@ class DesktopWsGateway:
     # Audio plumbing (runs on the gateway loop; heavy work offloaded)
     # ------------------------------------------------------------------ #
 
-    def _on_audio_bytes(
+    def _report_lifecycle(self, **payload: Any) -> None:
+        reporter = self._lifecycle_reporter
+        if reporter is None:
+            return
+        try:
+            reporter(**payload)
+        except Exception:
+            logger.exception('session lifecycle report failed')
+
+    async def _on_audio_bytes(
         self,
         state: _AudioStreamState,
         data: bytes,
         flush_threshold_bytes: int,
-        executor: ThreadPoolExecutor,
+        process_lock: asyncio.Lock,
     ) -> None:
         now_ms = int(time.time() * 1000)
         pcm = data
@@ -408,14 +494,15 @@ class DesktopWsGateway:
         elapsed_ms = now_ms - (state.buffer_started_ms or now_ms)
         if (
             len(state.buffer) >= flush_threshold_bytes
-            or elapsed_ms >= self._coalesce_ms * 2
+            or elapsed_ms >= self._coalesce_ms
         ):
             flush_pcm = bytes(state.buffer)
             state.buffer.clear()
             state.buffer_started_ms = None
             state.sequence += 1
             sequence = state.sequence
-            executor.submit(self._process_pcm, state, flush_pcm, sequence, now_ms)
+            async with process_lock:
+                await asyncio.to_thread(self._process_pcm, state, flush_pcm, sequence, now_ms)
 
     def _process_pcm(
         self,

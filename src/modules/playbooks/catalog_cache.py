@@ -27,12 +27,14 @@ class PlaybookCatalogCache:
         service_jwt_provider: Any = None,
         ttl_sec: float = 60.0,
         fetch_fn: Optional[FetchFn] = None,
+        redis_client: Any = None,
     ) -> None:
         self._base = (backend_http_base_url or '').rstrip('/')
         self._bootstrap_key = (bootstrap_key or '').strip()
         self._jwt_provider = service_jwt_provider
         self._ttl_sec = max(1.0, float(ttl_sec))
         self._fetch_fn = fetch_fn
+        self._redis = redis_client
         self._lock = threading.Lock()
         self._entries: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
@@ -45,9 +47,26 @@ class PlaybookCatalogCache:
             hit = self._entries.get(tid)
             if hit is not None and (now - hit[0]) < self._ttl_sec:
                 return list(hit[1])
+        redis_key = f'playbooks:catalog:{tid}'
+        if self._redis is not None:
+            try:
+                raw = self._redis.get(redis_key)
+                if raw:
+                    data = json.loads(raw)
+                    if isinstance(data, list):
+                        with self._lock:
+                            self._entries[tid] = (now, data)
+                        return list(data)
+            except Exception:
+                logger.exception('playbook.catalog_redis_get_failed | tenant=%s', tid)
         templates = self._fetch(tid)
         with self._lock:
             self._entries[tid] = (time.time(), templates)
+        if self._redis is not None and templates:
+            try:
+                self._redis.setex(redis_key, int(self._ttl_sec), json.dumps(templates))
+            except Exception:
+                logger.exception('playbook.catalog_redis_set_failed | tenant=%s', tid)
         return list(templates)
 
     def get_cached(self, tenant_id: str) -> list[dict[str, Any]]:
