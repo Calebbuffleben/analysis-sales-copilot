@@ -9,7 +9,6 @@ Bypasses the NestJS backend on the realtime critical path:
 """
 
 from .feedback_hub import FeedbackHub
-from .gateway_server import DesktopWsGateway
 from .jwt_auth import DesktopWsAuthenticator, WsAuthError
 
 __all__ = [
@@ -18,3 +17,11 @@ __all__ = [
     'DesktopWsAuthenticator',
     'WsAuthError',
 ]
+
+
+def __getattr__(name: str):
+    if name == 'DesktopWsGateway':
+        from .gateway_server import DesktopWsGateway
+
+        return DesktopWsGateway
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
