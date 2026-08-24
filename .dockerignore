@@ -16,3 +16,12 @@ htmlcov/
 .DS_Store
 *.log
 storage/
+.env
+.env.*
+!.env.example
+.git
+tests/
+**/__pycache__/
+*.md
+.mypy_cache/
+.ruff_cache/
