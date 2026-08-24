@@ -11,6 +11,8 @@ INTEREST_LEVEL = Literal["baixo", "medio", "alto"]
 RESISTANCE_LEVEL = Literal["baixa", "media", "alta"]
 ENGAGEMENT_LEVEL = Literal["baixo", "medio", "alto"]
 
+SENTIMENTO = Literal["positivo", "neutro", "negativo"]
+SENTIMENTO_TENDENCIA = Literal["subindo", "estavel", "caindo"]
 FASE_SPIN = Literal["neutro", "situacao", "problema", "implicacao", "necessidade"]
 
 _VALID_FASE_SPIN = frozenset({"neutro", "situacao", "problema", "implicacao", "necessidade"})
@@ -173,6 +175,22 @@ class ConversationState(BaseModel):
         default_factory=list,
         description="Benefits, claims, or promises stated during the meeting",
     )
+    sentimento_cliente: SENTIMENTO = Field(
+        default="neutro",
+        description="Customer sentiment: positivo, neutro, or negativo",
+    )
+    sentimento_tendencia: SENTIMENTO_TENDENCIA = Field(
+        default="estavel",
+        description="Sentiment trend: subindo, estavel, or caindo",
+    )
+    objecoes_ativas: list[str] = Field(
+        default_factory=list,
+        description="Active unresolved objection categories",
+    )
+    objecoes_resolvidas: list[str] = Field(
+        default_factory=list,
+        description="Resolved objection categories",
+    )
 
     @field_validator("fase_spin", mode="before")
     @classmethod
@@ -226,7 +244,7 @@ class ConversationState(BaseModel):
                 break
         return out
 
-    @field_validator("objecoes_detectadas")
+    @field_validator("objecoes_detectadas", "objecoes_ativas", "objecoes_resolvidas")
     @classmethod
     def validate_objections(cls, v: list[str]) -> list[str]:
         """Filter objections to only include valid categories.
@@ -258,6 +276,31 @@ class ConversationState(BaseModel):
             raise ValueError(f"Invalid resistance value: {v}. Must be 'baixa', 'media', or 'alta'")
         return v
     
+    @field_validator("sentimento_cliente", mode="before")
+    @classmethod
+    def normalize_sentimento(cls, v) -> str:
+        s = str(v or "neutro").lower().strip()
+        if s in ("positivo", "neutro", "negativo"):
+            return s
+        aliases = {"positive": "positivo", "negative": "negativo", "neutral": "neutro"}
+        return aliases.get(s, "neutro")
+
+    @field_validator("sentimento_tendencia", mode="before")
+    @classmethod
+    def normalize_tendencia(cls, v) -> str:
+        s = str(v or "estavel").lower().strip()
+        if s in ("subindo", "estavel", "caindo"):
+            return s
+        aliases = {
+            "up": "subindo",
+            "rising": "subindo",
+            "down": "caindo",
+            "falling": "caindo",
+            "stable": "estavel",
+            "estável": "estavel",
+        }
+        return aliases.get(s, "estavel")
+
     def to_dict(self) -> dict:
         """Convert to plain dict for JSON serialization."""
         return {
@@ -272,6 +315,10 @@ class ConversationState(BaseModel):
             "pain_points": self.pain_points,
             "objections": self.objections,
             "claims": self.claims,
+            "sentimento_cliente": self.sentimento_cliente,
+            "sentimento_tendencia": self.sentimento_tendencia,
+            "objecoes_ativas": self.objecoes_ativas,
+            "objecoes_resolvidas": self.objecoes_resolvidas,
         }
     
     @classmethod
