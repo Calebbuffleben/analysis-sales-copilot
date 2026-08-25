@@ -31,6 +31,8 @@ from ..utils.proto_utils import (
     validate_proto_file_list,
 )
 from ..modules.infra import MeetingStateStore, try_create_redis
+from ..modules.live_metrics import MeetingMetricsAggregator, SnapshotPublisher
+from ..modules.live_metrics.snapshot_publisher import snapshot_to_json_fields
 from ..ws_gateway import DesktopWsGateway, DesktopWsAuthenticator, FeedbackHub
 
 logger = logging.getLogger(__name__)
@@ -46,12 +48,14 @@ class _ServerRuntime:
         backend_feedback_client: BackendFeedbackClient,
         desktop_ws_gateway: Optional[DesktopWsGateway] = None,
         live_manager: Optional[GeminiLiveManager] = None,
+        snapshot_publisher: Optional[SnapshotPublisher] = None,
     ) -> None:
         self.text_analysis_service = text_analysis_service
         self.publish_dispatcher = publish_dispatcher
         self.backend_feedback_client = backend_feedback_client
         self.desktop_ws_gateway = desktop_ws_gateway
         self.live_manager = live_manager
+        self.snapshot_publisher = snapshot_publisher
         self._closed = False
 
     def shutdown(self) -> None:
@@ -70,6 +74,12 @@ class _ServerRuntime:
                 self.desktop_ws_gateway.stop()
         except Exception:
             logger.exception('Failed to stop desktop WS gateway')
+
+        try:
+            if self.snapshot_publisher is not None:
+                self.snapshot_publisher.shutdown()
+        except Exception:
+            logger.exception('Failed to stop snapshot publisher')
 
         try:
             self.text_analysis_service.shutdown()
@@ -255,6 +265,16 @@ def create_server(config: Settings) -> grpc.Server:
         local_broadcast_fn=feedback_hub.broadcast if feedback_hub else None,
     )
 
+    snapshot_publisher = SnapshotPublisher(
+        lambda snap: backend_feedback_client.publish_meeting_snapshot(
+            snapshot_to_json_fields(snap),
+        ),
+    )
+    metrics_aggregator = MeetingMetricsAggregator(
+        snapshot_publisher,
+        catalog_cache=playbook_catalog,
+    )
+
     text_analysis_service._publish_dispatcher = publish_dispatcher
 
     transcription_pipeline_service = TranscriptionPipelineService(
@@ -268,6 +288,7 @@ def create_server(config: Settings) -> grpc.Server:
         acoustic_shadow_mode=config.acoustic_shadow_mode,
         multimodal_audio_enabled=multimodal_audio,
         live_host_context_fn=None,
+        metrics_host_fn=metrics_aggregator.observe_host_window,
     )
     ready_window_dispatcher = ReadyWindowDispatcher(
         transcription_pipeline_service.process_window,
@@ -297,6 +318,7 @@ def create_server(config: Settings) -> grpc.Server:
             secondary_max_age_ms=config.live_specialist_max_age_ms,
             secondary_types=config.live_secondary_feedback_types,
             meeting_state=meeting_state,
+            metrics=metrics_aggregator,
         )
         turn_graphs = LiveTurnGraphs() if config.live_langgraph_enabled else None
         specialist_catalog = SpecialistCatalog(
@@ -322,6 +344,7 @@ def create_server(config: Settings) -> grpc.Server:
             live_provider=config.live_provider,
             key_pool=text_analysis_service._gemini_pool,
             meeting_state=meeting_state,
+            metrics=metrics_aggregator,
         )
         if config.live_specialist_enabled:
             specialist_fanout = SpecialistFanout(
@@ -440,6 +463,7 @@ def create_server(config: Settings) -> grpc.Server:
             backend_feedback_client=backend_feedback_client,
             desktop_ws_gateway=desktop_ws_gateway,
             live_manager=live_manager,
+            snapshot_publisher=snapshot_publisher,
         ),
     )
     return server

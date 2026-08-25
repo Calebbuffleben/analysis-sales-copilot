@@ -73,6 +73,7 @@ def _service_with_analyzer(analyzer: _FakeAnalyzer) -> TextAnalysisService:
     service._state_metadata = {}
     service._lock = _NullLock()
     service._llm_cache = _NoopCache()
+    service._meeting_state = None
     return service
 
 
@@ -189,6 +190,7 @@ def test_get_current_state_initializes_metadata() -> None:
     service._state = {}
     service._state_metadata = {}
     service._lock = _NullLock()
+    service._meeting_state = None
 
     state = service._get_current_state("tenant-1:meet-1")
 

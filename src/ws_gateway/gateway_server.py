@@ -197,19 +197,9 @@ class DesktopWsGateway:
 
         Supports websockets 12 ``(path, headers)`` and 13+ ``(connection, request)``.
         """
-        from http import HTTPStatus
+        from .health_handshake import health_http_result
 
-        body = b'{"status":"ok"}\n'
-        if len(args) == 2 and not hasattr(args[0], 'respond'):
-            path = str(args[0] or '')
-            if path.split('?', 1)[0] in ('/health', '/healthz'):
-                return HTTPStatus.OK, [], body
-            return None
-        connection, request = args[0], args[1]
-        path = str(getattr(request, 'path', '') or '')
-        if path.split('?', 1)[0] in ('/health', '/healthz'):
-            return connection.respond(HTTPStatus.OK, body)
-        return None
+        return health_http_result(*args)
 
     async def _serve(self) -> None:
         import websockets

@@ -51,6 +51,45 @@ EMIT_FEEDBACK_TOOL = {
                     'estado': {
                         'type': 'object',
                         'description': 'Partial conversation state delta.',
+                        'properties': {
+                            'fase_spin': {
+                                'type': 'string',
+                                'description': 'neutro|situacao|problema|implicacao|necessidade',
+                            },
+                            'interesse': {
+                                'type': 'string',
+                                'description': 'baixo|medio|alto',
+                            },
+                            'engajamento': {
+                                'type': 'string',
+                                'description': 'baixo|medio|alto',
+                            },
+                            'resistencia': {
+                                'type': 'string',
+                                'description': 'baixa|media|alta',
+                            },
+                            'sentimento_cliente': {
+                                'type': 'string',
+                                'description': 'positivo|neutro|negativo',
+                            },
+                            'sentimento_tendencia': {
+                                'type': 'string',
+                                'description': 'subindo|estavel|caindo',
+                            },
+                            'objecoes_ativas': {
+                                'type': 'array',
+                                'items': {'type': 'string'},
+                                'description': (
+                                    'Open objection categories, e.g. preco, tempo, '
+                                    'confianca, autoridade, necessidade.'
+                                ),
+                            },
+                            'objecoes_resolvidas': {
+                                'type': 'array',
+                                'items': {'type': 'string'},
+                                'description': 'Objection categories already handled this call.',
+                            },
+                        },
                     },
                     'playbook_template_key': {
                         'type': 'string',
@@ -78,7 +117,10 @@ SYSTEM_INSTRUCTION = (
     'uma vez com o turnId daquele turno. Cada novo turnId é um turno novo — chame de '
     'novo. Nunca reutilize um turnId antigo. Nunca responda por voz. Se não houver '
     'feedback útil, chame emit_feedback com feedback="" e confidence=0. Priorize '
-    'objection, opportunity, rapport, closing, clarification e risk.'
+    'objection, opportunity, rapport, closing, clarification e risk. '
+    'Em estado, preencha sentimento_cliente (positivo|neutro|negativo), '
+    'sentimento_tendencia (subindo|estavel|caindo) e separe objecoes_ativas '
+    'de objecoes_resolvidas usando as categorias preco/tempo/confianca/etc.'
 )
 
 

@@ -90,3 +90,26 @@ def test_post_graph_awaits_prosody_and_publishes_once() -> None:
 
     assert result['published'] is True
     assert published == [{'energy': 'high'}]
+
+
+def test_post_graph_observes_metrics_even_when_publish_drops() -> None:
+    """observe_metrics feeds the monitor aggregator before publish gating."""
+    graphs = LiveTurnGraphs()
+    observed = []
+
+    async def prosody():
+        return {'energy': 'low'}
+
+    result = asyncio.run(
+        graphs.run_post_tool(
+            {
+                'turn_id': 'turn-1',
+                'await_prosody_fn': prosody,
+                'metrics_fn': observed.append,
+                'publish_fn': lambda _prosody: False,
+            },
+        ),
+    )
+
+    assert result['published'] is False
+    assert observed == [{'energy': 'low'}]

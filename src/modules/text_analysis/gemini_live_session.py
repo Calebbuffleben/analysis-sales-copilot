@@ -159,11 +159,13 @@ class GeminiLiveManager:
         provider: Optional[Any] = None,
         key_pool: Optional[Any] = None,
         meeting_state: Optional[Any] = None,
+        metrics: Optional[Any] = None,
     ) -> None:
         self._api_key = (api_key or '').strip()
         self._model_name = model_name
         self._key_pool = key_pool
         self._meeting_state = meeting_state
+        self._metrics = metrics
         self._provider = provider or create_realtime_provider(
             name=live_provider,
             api_key=self._api_key,
@@ -778,6 +780,17 @@ class GeminiLiveManager:
             session.model_turn_done.clear()
             turn_pcm = bytes(session.turn_pcm)
             session.turn_pcm.clear()
+            if self._metrics is not None:
+                bytes_per_ms = max(session.sample_rate * session.channels * 2 / 1000.0, 1.0)
+                duration_ms = int(len(turn_pcm) / bytes_per_ms)
+                try:
+                    self._metrics.observe_customer_turn(
+                        tenant_id=str(meta.get('tenant_id') or ''),
+                        meeting_id=str(meta.get('meeting_id') or ''),
+                        duration_ms=duration_ms,
+                    )
+                except Exception:
+                    logger.debug('customer talk stats hook failed', exc_info=True)
             self._schedule_prosody(session, event.turn_id, turn_pcm)
             logger.info(
                 'live.vad.end | meeting=%s | turnId=%s',
@@ -1060,6 +1073,14 @@ class GeminiLiveManager:
         # Seed next-turn RAG query (memory only).
         session.retrieve_query_hint = hint_from_emit_feedback_args(args)
 
+        def observe_metrics(prosody_value: Optional[ProsodySnapshot]) -> None:
+            self._publisher.observe_turn_metrics(
+                meeting_id=meta.meeting_id,
+                tenant_id=meta.tenant_id,
+                args=args,
+                prosody=prosody_value,
+            )
+
         def publish_primary(prosody_value: Optional[ProsodySnapshot]) -> bool:
             return self._publisher.publish_tool_call(
                 meeting_id=meta.meeting_id,
@@ -1099,6 +1120,7 @@ class GeminiLiveManager:
                     'turn_id': turn_id,
                     'args': args,
                     'await_prosody_fn': lambda: self._await_prosody(session, turn_id),
+                    'metrics_fn': observe_metrics,
                     'publish_fn': publish_primary,
                     'specialist_enqueue_fn': enqueue_specialists,
                 },
@@ -1107,6 +1129,7 @@ class GeminiLiveManager:
             published = bool(post_state.get('published'))
         else:
             prosody = await self._await_prosody(session, turn_id)
+            observe_metrics(prosody)
             published = await asyncio.to_thread(publish_primary, prosody)
             if published:
                 enqueue_specialists()

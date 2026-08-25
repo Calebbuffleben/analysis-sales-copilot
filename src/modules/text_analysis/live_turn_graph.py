@@ -30,6 +30,7 @@ class LiveTurnState(TypedDict, total=False):
     prosody: Any
     published: bool
     specialist_enqueue_fn: Callable[[], bool]
+    metrics_fn: Callable[[Any], None]
 
 
 def _timed(node: str, fn: Callable[[LiveTurnState], dict[str, Any]]):
@@ -71,10 +72,12 @@ class LiveTurnGraphs:
 
         post = StateGraph(LiveTurnState)
         post.add_node('merge_prosody', self._merge_prosody)
+        post.add_node('observe_metrics', self._observe_metrics)
         post.add_node('publish_primary', self._publish_primary)
         post.add_node('fanout_specialists', self._fanout_specialists)
         post.add_edge(START, 'merge_prosody')
-        post.add_edge('merge_prosody', 'publish_primary')
+        post.add_edge('merge_prosody', 'observe_metrics')
+        post.add_edge('observe_metrics', 'publish_primary')
         post.add_edge('publish_primary', 'fanout_specialists')
         post.add_edge('fanout_specialists', END)
         self.post_tool = post.compile()
@@ -125,6 +128,17 @@ class LiveTurnGraphs:
             LANGGRAPH_NODE_MS.labels(node='merge_prosody').observe(
                 (time.perf_counter() - started) * 1000.0,
             )
+
+    @staticmethod
+    def _observe_metrics(state: LiveTurnState) -> dict[str, Any]:
+        fn = state.get('metrics_fn')
+        if fn is None:
+            return {}
+        try:
+            fn(state.get('prosody'))
+        except Exception:
+            return {}
+        return {}
 
     @staticmethod
     async def _publish_primary(state: LiveTurnState) -> dict[str, Any]:

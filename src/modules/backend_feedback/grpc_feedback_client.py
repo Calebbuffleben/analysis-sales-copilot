@@ -279,8 +279,49 @@ class BackendFeedbackClient:
                 metadata=self._build_call_metadata(tenant_id),
             )
         except Exception:
-            logger.exception(
+                logger.exception(
                 'session lifecycle rpc failed | event=%s | meeting=%s',
                 event,
+                meeting_id,
+            )
+
+    def publish_meeting_snapshot(self, snapshot: dict[str, Any]) -> None:
+        """Publish a manager-floor metrics snapshot. Fail-open."""
+        if self._enabled and self._stub is None:
+            self._initialize_stub()
+        if not self._enabled or self._stub is None:
+            return
+        request_cls = getattr(
+            self._feedback_ingestion_pb2,
+            'MeetingSnapshotRequest',
+            None,
+        )
+        if request_cls is None:
+            logger.warning('MeetingSnapshotRequest missing from proto — skip snapshot')
+            return
+        tenant_id = str(snapshot.get('tenant_id') or '')
+        meeting_id = str(snapshot.get('meeting_id') or '')
+        if not tenant_id or not meeting_id:
+            return
+        request = request_cls(
+            tenant_id=tenant_id,
+            meeting_id=meeting_id,
+            health_score=int(snapshot.get('health_score') or 50),
+            talk_listen_json=str(snapshot.get('talk_listen_json') or ''),
+            objections_json=str(snapshot.get('objections_json') or ''),
+            playbook_adherence_json=str(snapshot.get('playbook_adherence_json') or ''),
+            sentiment_trend_json=str(snapshot.get('sentiment_trend_json') or ''),
+            alerts_json=str(snapshot.get('alerts_json') or ''),
+            ts_ms=int(snapshot.get('ts_ms') or 0),
+        )
+        try:
+            self._stub.PublishMeetingSnapshot(
+                request,
+                timeout=self._timeout_seconds,
+                metadata=self._build_call_metadata(tenant_id),
+            )
+        except Exception:
+            logger.exception(
+                'meeting snapshot rpc failed | meeting=%s',
                 meeting_id,
             )

@@ -146,6 +146,7 @@ class TranscriptionPipelineService:
         multimodal_audio_enabled: bool = False,
         live_host_context_fn: Optional[Callable[[str, str], None]] = None,
         live_host_observe_interval_ms: int = 15_000,
+        metrics_host_fn: Optional[Callable[..., None]] = None,
     ) -> None:
         self._transcription_service = transcription_service
         self._text_analysis_service = text_analysis_service
@@ -161,6 +162,28 @@ class TranscriptionPipelineService:
         self._live_host_context_fn = live_host_context_fn
         self._live_host_observe_interval_ms = max(0, int(live_host_observe_interval_ms))
         self._live_host_last_observe_ms: dict[str, int] = {}
+        self._metrics_host_fn = metrics_host_fn
+
+    def _observe_host_talk_stats(self, window_pcm: bytes, meta: dict) -> None:
+        if self._metrics_host_fn is None or not _is_host_role(meta.get('participant_role')):
+            return
+        try:
+            stats = compute_pcm_window_stats(
+                window_pcm,
+                sample_rate=int(meta.get('sample_rate', 0) or 0),
+                channels=max(int(meta.get('channels', 1) or 1), 1),
+            )
+            samples = max(int(stats.get('samples_count') or 0), 1)
+            speech_ratio = float(stats.get('speech_count') or 0) / samples
+            duration_ms = int(float(stats.get('duration_seconds') or 0) * 1000)
+            self._metrics_host_fn(
+                tenant_id=str(meta.get('tenant_id') or ''),
+                meeting_id=str(meta.get('meeting_id') or ''),
+                duration_ms=duration_ms,
+                speech_ratio=speech_ratio,
+            )
+        except Exception:
+            logger.debug('host talk stats hook failed', exc_info=True)
 
     def _should_skip_live_host_observe(self, meeting_id: str) -> bool:
         """Throttle host generateContent while Live owns the client path."""
@@ -187,6 +210,7 @@ class TranscriptionPipelineService:
         meta: dict,
     ) -> None:
         """Process one ready window: STT, analysis, publish."""
+        self._observe_host_talk_stats(window_pcm, meta)
         if self._multimodal_audio_enabled:
             self._process_audio_window(stream_key, window_pcm, meta)
             return

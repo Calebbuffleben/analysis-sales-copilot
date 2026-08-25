@@ -24,6 +24,11 @@ class FeedbackIngestionServiceStub(object):
                 request_serializer=feedback__ingestion__pb2.SessionLifecycleRequest.SerializeToString,
                 response_deserializer=feedback__ingestion__pb2.SessionLifecycleResponse.FromString,
                 )
+        self.PublishMeetingSnapshot = channel.unary_unary(
+                '/feedback_ingestion.FeedbackIngestionService/PublishMeetingSnapshot',
+                request_serializer=feedback__ingestion__pb2.MeetingSnapshotRequest.SerializeToString,
+                response_deserializer=feedback__ingestion__pb2.MeetingSnapshotResponse.FromString,
+                )
 
 
 class FeedbackIngestionServiceServicer(object):
@@ -41,6 +46,12 @@ class FeedbackIngestionServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def PublishMeetingSnapshot(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_FeedbackIngestionServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -53,6 +64,11 @@ def add_FeedbackIngestionServiceServicer_to_server(servicer, server):
                     servicer.ReportSessionLifecycle,
                     request_deserializer=feedback__ingestion__pb2.SessionLifecycleRequest.FromString,
                     response_serializer=feedback__ingestion__pb2.SessionLifecycleResponse.SerializeToString,
+            ),
+            'PublishMeetingSnapshot': grpc.unary_unary_rpc_method_handler(
+                    servicer.PublishMeetingSnapshot,
+                    request_deserializer=feedback__ingestion__pb2.MeetingSnapshotRequest.FromString,
+                    response_serializer=feedback__ingestion__pb2.MeetingSnapshotResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -95,5 +111,22 @@ class FeedbackIngestionService(object):
         return grpc.experimental.unary_unary(request, target, '/feedback_ingestion.FeedbackIngestionService/ReportSessionLifecycle',
             feedback__ingestion__pb2.SessionLifecycleRequest.SerializeToString,
             feedback__ingestion__pb2.SessionLifecycleResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def PublishMeetingSnapshot(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/feedback_ingestion.FeedbackIngestionService/PublishMeetingSnapshot',
+            feedback__ingestion__pb2.MeetingSnapshotRequest.SerializeToString,
+            feedback__ingestion__pb2.MeetingSnapshotResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
