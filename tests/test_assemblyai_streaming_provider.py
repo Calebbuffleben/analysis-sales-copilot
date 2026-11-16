@@ -245,6 +245,7 @@ def test_tab_audio_url_uses_tuned_vad(monkeypatch: Any) -> None:
     assert 'vad_threshold=0.65' in url
     assert 'max_turn_silence=800' in url
     assert 'enable_partial_transcripts=true' in url
+    assert 'language_code=en' in url
     assert 'continuous_partials' not in url
 
     mic_url = provider._build_url(

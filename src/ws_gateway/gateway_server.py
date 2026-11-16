@@ -115,6 +115,9 @@ class DesktopWsGateway:
         audio_service: 'AudioService',
         coalesce_ms: int = 100,
         host: str = '0.0.0.0',
+        on_stream_started: Optional[Any] = None,
+        on_stream_ended: Optional[Any] = None,
+        on_meeting_end: Optional[Any] = None,
     ) -> None:
         self._port = port
         self._host = host
@@ -122,6 +125,9 @@ class DesktopWsGateway:
         self._feedback_hub = feedback_hub
         self._audio_service = audio_service
         self._coalesce_ms = max(20, coalesce_ms)
+        self._on_stream_started = on_stream_started
+        self._on_stream_ended = on_stream_ended
+        self._on_meeting_end = on_meeting_end
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event: Optional[asyncio.Event] = None
@@ -370,6 +376,20 @@ class DesktopWsGateway:
     ) -> None:
         label = parse_label_control(raw)
         if label is None:
+            try:
+                message = json.loads(raw)
+            except (TypeError, ValueError):
+                message = None
+            if isinstance(message, dict) and message.get('type') == 'end_meeting':
+                if self._on_meeting_end is not None:
+                    try:
+                        self._on_meeting_end(state.meeting_id)
+                    except Exception:
+                        logger.exception(
+                            'assistant end_meeting failed | meetingId=%s',
+                            state.meeting_id,
+                        )
+                return
             self._on_control_message(websocket, raw)
             return
         state.label_buffer.upsert(label)
@@ -427,6 +447,17 @@ class DesktopWsGateway:
         try:
             if not state.started:
                 state.started = True
+                if self._on_stream_started is not None:
+                    stream_key = (
+                        f'{state.meeting_id}:{state.participant_id}:{state.track}'
+                    )
+                    try:
+                        self._on_stream_started(state.meeting_id, stream_key)
+                    except Exception:
+                        logger.exception(
+                            'assistant stream start hook failed | meetingId=%s',
+                            state.meeting_id,
+                        )
                 self._audio_service.start_stream(
                     meeting_id=state.meeting_id,
                     participant_id=state.participant_id,
@@ -464,6 +495,17 @@ class DesktopWsGateway:
                 participant_id=state.participant_id,
                 track=state.track,
             )
+            if self._on_stream_ended is not None:
+                stream_key = (
+                    f'{state.meeting_id}:{state.participant_id}:{state.track}'
+                )
+                try:
+                    self._on_stream_ended(state.meeting_id, stream_key)
+                except Exception:
+                    logger.exception(
+                        'assistant stream end hook failed | meetingId=%s',
+                        state.meeting_id,
+                    )
             logger.info(
                 '✅ ws audio ingress finished | meetingId=%s | participantId=%s | chunks=%s',
                 state.meeting_id,

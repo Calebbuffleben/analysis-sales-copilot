@@ -124,6 +124,40 @@ class FeedbackHub:
         )
         return True
 
+    def broadcast_assistant(
+        self,
+        tenant_id: str,
+        meeting_id: str,
+        message: dict[str, Any],
+    ) -> bool:
+        """Push an assistant event (caption, turn summary, recap) with no coaching gate."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return False
+        key = (tenant_id, meeting_id)
+        with self._lock:
+            connections = list(self._rooms.get(key) or ())
+        if not connections:
+            return False
+        try:
+            text = json.dumps(message, ensure_ascii=False)
+        except (TypeError, ValueError):
+            logger.exception('ws assistant payload serialization failed')
+            return False
+        for connection in connections:
+            asyncio.run_coroutine_threadsafe(
+                self._safe_send(connection, text),
+                loop,
+            )
+        logger.info(
+            'ws assistant broadcast | tenantId=%s | meetingId=%s | type=%s | subscribers=%s',
+            tenant_id,
+            meeting_id,
+            message.get('type'),
+            len(connections),
+        )
+        return True
+
     @staticmethod
     async def _safe_send(connection: Any, text: str) -> None:
         try:

@@ -231,9 +231,14 @@ def create_server(config: Settings) -> grpc.Server:
         futures.ThreadPoolExecutor(max_workers=config.grpc_workers)
     )
 
-    # Create services
-    live_audio = config.audio_analysis_mode == 'live'
-    multimodal_audio = config.audio_analysis_mode in {'multimodal', 'live'}
+    # Create services. The personal assistant owns the hot path and does not
+    # run sales Live, multimodal coaching, or playbook resolution.
+    assistant_enabled = config.assistant_enabled
+    live_audio = (not assistant_enabled) and config.audio_analysis_mode == 'live'
+    multimodal_audio = (
+        not assistant_enabled
+        and config.audio_analysis_mode in {'multimodal', 'live'}
+    )
     sliding_window_worker = SlidingWindowWorker(
         min_window_seconds=config.audio_buffer_min_window_seconds,
         min_interval_ms=(
@@ -287,8 +292,10 @@ def create_server(config: Settings) -> grpc.Server:
     # Direct desktop feedback hub: broadcasts locally BEFORE the backend
     # gRPC publish; backend stays in the loop for persistence/dashboard only.
     playbook_catalog: PlaybookCatalogCache | None = None
-    if config.backend_http_base_url and (
-        config.service_bootstrap_key or service_jwt_provider is not None
+    if (
+        not assistant_enabled
+        and config.backend_http_base_url
+        and (config.service_bootstrap_key or service_jwt_provider is not None)
     ):
         playbook_catalog = PlaybookCatalogCache(
             backend_http_base_url=config.backend_http_base_url,
@@ -326,7 +333,10 @@ def create_server(config: Settings) -> grpc.Server:
             vad_filter=config.whisper_vad_filter,
             empty_diagnostic_no_vad=config.whisper_empty_diagnostic_no_vad,
             low_energy_dbfs_threshold=config.whisper_low_energy_dbfs,
-            default_language=config.whisper_default_language,
+            default_language=(
+                config.whisper_default_language
+                or ('en' if assistant_enabled else None)
+            ),
             process_workers=config.stt_process_workers,
         )
 
@@ -334,7 +344,10 @@ def create_server(config: Settings) -> grpc.Server:
         transcription_service=transcription_service,
         text_analysis_service=text_analysis_service,
         publish_dispatcher=publish_dispatcher,
-        default_language=config.whisper_default_language,
+        default_language=(
+            config.whisper_default_language
+            or ('en' if assistant_enabled else None)
+        ),
         partial_min_confidence=config.partial_min_confidence,
         feedback_allow_host_publish=config.feedback_allow_host_publish,
         acoustic_routing_enabled=config.acoustic_routing_enabled,
@@ -344,7 +357,8 @@ def create_server(config: Settings) -> grpc.Server:
     )
     partial_coordinator: PartialTurnCoordinator | None = None
     if (
-        not multimodal_audio
+        not assistant_enabled
+        and not multimodal_audio
         and config.stt_provider == 'assemblyai'
         and config.partial_analysis_enabled
     ):
@@ -396,6 +410,50 @@ def create_server(config: Settings) -> grpc.Server:
         )
         transcription_pipeline_service._partial_coordinator = partial_coordinator
 
+    meeting_assistant = None
+    if assistant_enabled:
+        from ..modules.text_analysis.meeting_assistant import build_meeting_assistant
+
+        gemini_keys = config.effective_gemini_api_keys()
+        assistant_key = gemini_keys[0] if gemini_keys else ''
+
+        def _broadcast_assistant(
+            tenant_id: str,
+            meeting_id: str,
+            message: dict,
+        ) -> bool:
+            if feedback_hub is None:
+                return False
+            return feedback_hub.broadcast_assistant(tenant_id, meeting_id, message)
+
+        meeting_assistant = build_meeting_assistant(
+            api_key=assistant_key,
+            model_name=config.gemini_model,
+            broadcast=_broadcast_assistant,
+            base_url=config.backend_http_base_url or '',
+            bootstrap_key=config.service_bootstrap_key or '',
+            get_token=(
+                service_jwt_provider.get_token
+                if service_jwt_provider is not None
+                else None
+            ),
+            stable_ms=config.assistant_partial_stable_ms,
+        )
+        transcription_pipeline_service.attach_assistant(meeting_assistant)
+        if not assistant_key:
+            logger.warning(
+                'Assistant enabled without a Gemini API key; captions and summaries '
+                'will report translation as unavailable.',
+            )
+        logger.info(
+            'Meeting assistant enabled | model=%s | partial_stable_ms=%s | '
+            'stt=%s | language=%s',
+            config.gemini_model,
+            config.assistant_partial_stable_ms,
+            config.stt_provider,
+            config.assemblyai_language or 'auto',
+        )
+
     streaming_stt_provider: AssemblyAiStreamingProvider | None = None
     if not multimodal_audio and config.stt_provider == 'assemblyai':
         assert config.assemblyai_api_key
@@ -437,6 +495,31 @@ def create_server(config: Settings) -> grpc.Server:
                 extra_meta=extra_meta or None,
             )
 
+        def _on_assemblyai_partial(
+            stream_key: str,
+            text: str,
+            partial_meta: dict[str, object],
+        ) -> None:
+            if meeting_assistant is None:
+                return
+            from ..modules.text_analysis.types import TranscriptionChunk
+
+            now_ms = int(partial_meta.get('timestamp_ms') or time.time() * 1000)
+            turn_start = int(partial_meta.get('turn_start_ms') or now_ms)
+            chunk = TranscriptionChunk(
+                meeting_id=str(partial_meta.get('meeting_id') or ''),
+                participant_id=str(partial_meta.get('participant_id') or ''),
+                track=str(partial_meta.get('track') or ''),
+                text=text,
+                confidence=float(partial_meta.get('transcript_confidence') or 0.0),
+                timestamp_ms=now_ms,
+                window_start_ms=turn_start,
+                window_end_ms=now_ms,
+                tenant_id=str(partial_meta.get('tenant_id') or ''),
+                participant_role=str(partial_meta.get('participant_role') or ''),
+            )
+            meeting_assistant.on_partial(stream_key, chunk, partial_meta)
+
         streaming_stt_provider = AssemblyAiStreamingProvider(
             AssemblyAiStreamConfig(
                 api_key=config.assemblyai_api_key,
@@ -444,7 +527,8 @@ def create_server(config: Settings) -> grpc.Server:
                 speech_model=config.assemblyai_speech_model,
                 sample_rate=config.assemblyai_sample_rate,
                 format_turns=config.assemblyai_format_turns,
-                continuous_partials=config.assemblyai_continuous_partials,
+                continuous_partials=config.assemblyai_continuous_partials
+                or assistant_enabled,
                 stream_idle_timeout_ms=config.assemblyai_stream_idle_timeout_ms,
                 reconnect_limit=config.assemblyai_reconnect_limit,
                 connect_timeout_seconds=config.assemblyai_connect_timeout_seconds,
@@ -456,6 +540,7 @@ def create_server(config: Settings) -> grpc.Server:
                 max_turn_silence_ms=config.assemblyai_max_turn_silence_ms,
                 vad_threshold=config.assemblyai_vad_threshold,
                 keyterms_prompt=config.assemblyai_keyterms_prompt,
+                language_code=config.assemblyai_language,
                 tab_audio_vad_threshold=config.assemblyai_tab_audio_vad_threshold,
                 tab_audio_max_turn_silence_ms=(
                     config.assemblyai_tab_audio_max_turn_silence_ms
@@ -463,6 +548,7 @@ def create_server(config: Settings) -> grpc.Server:
             ),
             _on_assemblyai_final,
             partial_coordinator=partial_coordinator,
+            on_partial_text=_on_assemblyai_partial if assistant_enabled else None,
         )
     else:
         ready_window_dispatcher = ReadyWindowDispatcher(
@@ -545,6 +631,21 @@ def create_server(config: Settings) -> grpc.Server:
             feedback_hub=feedback_hub,
             audio_service=audio_service,
             coalesce_ms=config.desktop_ws_coalesce_ms,
+            on_stream_started=(
+                meeting_assistant.note_stream_started
+                if meeting_assistant is not None
+                else None
+            ),
+            on_stream_ended=(
+                meeting_assistant.note_stream_ended
+                if meeting_assistant is not None
+                else None
+            ),
+            on_meeting_end=(
+                meeting_assistant.request_end
+                if meeting_assistant is not None
+                else None
+            ),
         )
         desktop_ws_gateway.start()
     else:

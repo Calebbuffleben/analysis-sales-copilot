@@ -52,6 +52,7 @@ _MIN_SEND_MS = 50
 _MAX_SEND_MS = 1000
 
 FinalTranscriptCallback = Callable[[str, TranscriptionChunk, dict[str, object]], None]
+PartialTextCallback = Callable[[str, str, dict[str, object]], None]
 
 
 @dataclass
@@ -74,6 +75,7 @@ class AssemblyAiStreamConfig:
     max_turn_silence_ms: Optional[int] = None
     vad_threshold: Optional[float] = None
     keyterms_prompt: Optional[str] = None
+    language_code: str = 'en'
     tab_audio_vad_threshold: Optional[float] = None
     tab_audio_max_turn_silence_ms: Optional[int] = None
 
@@ -111,10 +113,12 @@ class AssemblyAiStreamingProvider:
         on_final_transcript: FinalTranscriptCallback,
         *,
         partial_coordinator: Optional[PartialTurnCoordinator] = None,
+        on_partial_text: Optional[PartialTextCallback] = None,
     ) -> None:
         self._config = config
         self._on_final_transcript = on_final_transcript
         self._partial_coordinator = partial_coordinator
+        self._on_partial_text = on_partial_text
         self._sessions: dict[str, _AssemblyAiSession] = {}
         self._reconnect_counts: dict[str, int] = {}
         self._lock = threading.RLock()
@@ -346,6 +350,9 @@ class AssemblyAiStreamingProvider:
             params['vad_threshold'] = vad_threshold
         if self._config.keyterms_prompt:
             params['keyterms_prompt'] = self._config.keyterms_prompt
+        language_code = (self._config.language_code or '').strip().lower()
+        if language_code:
+            params['language_code'] = language_code
 
         encoded = urlencode(
             {
@@ -441,8 +448,6 @@ class AssemblyAiStreamingProvider:
         stream_key: str,
         payload: dict[str, Any],
     ) -> None:
-        if self._partial_coordinator is None:
-            return
         transcript = str(payload.get('transcript') or '').strip()
         if not transcript:
             return
@@ -481,6 +486,16 @@ class AssemblyAiStreamingProvider:
             elif not partial_meta.get('acoustic_class'):
                 partial_meta['acoustic_class'] = session.label_buffer.current_class()
 
+        partial_meta['timestamp_ms'] = now_ms
+        if self._on_partial_text is not None:
+            self._callback_executor.submit(
+                self._on_partial_text,
+                stream_key,
+                transcript,
+                partial_meta,
+            )
+        if self._partial_coordinator is None:
+            return
         self._partial_coordinator.handle_partial(
             stream_key,
             transcript,

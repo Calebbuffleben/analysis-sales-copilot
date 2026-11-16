@@ -82,6 +82,7 @@ class Settings:
     assemblyai_max_turn_silence_ms: Optional[int] = None
     assemblyai_vad_threshold: Optional[float] = None
     assemblyai_keyterms_prompt: Optional[str] = None
+    assemblyai_language: str = 'en'
     assemblyai_tab_audio_vad_threshold: Optional[float] = None
     assemblyai_tab_audio_max_turn_silence_ms: Optional[int] = None
     partial_analysis_enabled: bool = True
@@ -149,6 +150,10 @@ class Settings:
     gemini_rpm_limit: int = 12
     gemini_rpm_window_sec: float = 60.0
     gemini_key_routing: str = 'tenant'
+    # Personal meeting assistant (captions, turn summary, recap). When enabled,
+    # the hot path skips sales coaching, Live, and playbooks.
+    assistant_enabled: bool = True
+    assistant_partial_stable_ms: int = 400
 
     @classmethod
     def from_env(cls) -> 'Settings':
@@ -356,6 +361,9 @@ class Settings:
             assemblyai_keyterms_prompt=(
                 (os.getenv('ASSEMBLYAI_KEYTERMS_PROMPT') or '').strip() or None
             ),
+            assemblyai_language=(
+                os.getenv('ASSEMBLYAI_LANGUAGE', 'en').strip().lower()
+            ),
             assemblyai_tab_audio_vad_threshold=cls._optional_float(
                 os.getenv('ASSEMBLYAI_TAB_AUDIO_VAD_THRESHOLD'),
             ),
@@ -442,6 +450,11 @@ class Settings:
             gemini_rpm_limit=int(os.getenv('GEMINI_RPM_LIMIT', '12')),
             gemini_rpm_window_sec=float(os.getenv('GEMINI_RPM_WINDOW_SEC', '60.0')),
             gemini_key_routing=os.getenv('GEMINI_KEY_ROUTING', 'tenant').strip().lower(),
+            assistant_enabled=os.getenv('ASSISTANT_ENABLED', 'true').strip().lower()
+            == 'true',
+            assistant_partial_stable_ms=int(
+                os.getenv('ASSISTANT_PARTIAL_STABLE_MS', '400'),
+            ),
         )
 
     @staticmethod

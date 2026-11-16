@@ -162,6 +162,11 @@ class TranscriptionPipelineService:
         self._live_host_context_fn = live_host_context_fn
         self._live_host_observe_interval_ms = max(0, int(live_host_observe_interval_ms))
         self._live_host_last_observe_ms: dict[str, int] = {}
+        self._assistant = None
+
+    def attach_assistant(self, assistant: object) -> None:
+        """Route transcripts to the personal meeting assistant instead of sales coaching."""
+        self._assistant = assistant
 
     def _should_skip_live_host_observe(self, meeting_id: str) -> bool:
         """Throttle host generateContent while Live owns the client path."""
@@ -284,6 +289,9 @@ class TranscriptionPipelineService:
             tenant_id=str(enriched_meta.get('tenant_id') or ''),
             participant_role=str(enriched_meta.get('participant_role') or ''),
         )
+        if self._assistant is not None:
+            self._assistant.on_final(stream_key, chunk, enriched_meta)
+            return
         logger.info(f"[Step 3] Enviando transcrição para análise do Gemini")
         t_ana_start = time.perf_counter()
         observe_only = _should_observe_only(
@@ -500,6 +508,15 @@ class TranscriptionPipelineService:
             return
 
         source = (transcript_source or 'final').strip().lower()
+        if self._assistant is not None:
+            extra = dict(extra_meta or {})
+            if source == 'partial':
+                self._assistant.on_partial(stream_key, chunk, extra)
+            else:
+                self._assistant.on_final(stream_key, chunk, extra)
+                if self._partial_coordinator is not None:
+                    self._partial_coordinator.reset_turn(stream_key)
+            return
         meta = dict(extra_meta or {})
         coordinator = self._partial_coordinator
 
